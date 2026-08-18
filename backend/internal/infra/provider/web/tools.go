@@ -28,6 +28,10 @@ var (
 	invokePattern        = regexp.MustCompile(`(?is)<invoke\s+name=["']?([A-Za-z0-9_-]+)["']?\s*>(.*?)</invoke\s*>`)
 )
 
+// errToolCallRequired 表示请求强制要求工具调用（tool_choice=required 或指定函数），
+// 但模型没有产生任何合法调用。调用方应把它当作明确错误处理，而不是静默返回普通文本。
+var errToolCallRequired = errors.New("tool_choice 要求调用工具，但模型没有返回合法的工具调用")
+
 type functionTool struct {
 	Name        string
 	Description string
@@ -42,6 +46,12 @@ type toolConfiguration struct {
 	ForcedName      string
 	ResponseTools   []any
 	ResponseChoice  any
+}
+
+// requiresFunctionCall 判断 tool_choice 是否强制要求返回一个函数调用结果。
+// 与 injectToolPrompt 的强制提示词保持同一口径：强制函数名，或 required 且无托管搜索。
+func (c toolConfiguration) requiresFunctionCall() bool {
+	return c.ForcedName != "" || (c.Choice == "required" && !c.HostedWebSearch)
 }
 
 type parsedToolCall struct {
@@ -414,6 +424,12 @@ func (s *toolStreamSieve) Feed(chunk string) toolStreamResult {
 		s.capturing = true
 		s.buffer = combined[index:]
 		combined = combined[:index]
+	} else {
+		// 已进入捕获态：把新 chunk 追加回缓冲区并继续等待 </tool_calls>，
+		// 同时不向客户端输出任何文本。此前这里清空了 buffer 却仍用 buffer 搜索
+		// 结束标签，导致跨 chunk 的 XML 被原样泄露。
+		s.buffer = combined
+		combined = ""
 	}
 	lower := strings.ToLower(s.buffer)
 	endIndex := strings.Index(lower, "</tool_calls>")
@@ -444,7 +460,11 @@ func (s *toolStreamSieve) Flush() toolStreamResult {
 		s.done = true
 		return toolStreamResult{Calls: parsed.Calls, Complete: true, Raw: raw}
 	}
-	return toolStreamResult{SafeText: raw, Complete: parsed.SawSyntax, Raw: raw}
+	if parsed.SawSyntax {
+		// Fail closed：检测到工具 XML 但没有合法调用时，绝不把内部标记泄露给客户端。
+		return toolStreamResult{Complete: true, Raw: raw}
+	}
+	return toolStreamResult{SafeText: raw}
 }
 
 func splitToolPrefix(value string) (string, string) {

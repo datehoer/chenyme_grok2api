@@ -352,7 +352,11 @@ func (a *Adapter) ForwardResponse(ctx context.Context, request provider.Response
 	parsed.Tools = tools.ResponseTools
 	parsed.ToolChoice = tools.ResponseChoice
 	parsed.ParallelTools = parallelTools
-	applyParsedToolCalls(&parsed, tools)
+	if err := applyParsedToolCalls(&parsed, tools); err != nil {
+		return jsonProviderResponse(http.StatusUnprocessableEntity, map[string]any{"error": map[string]any{
+			"message": err.Error(), "type": "invalid_request_error", "code": "tool_call_required",
+		}}), nil
+	}
 	if err := a.archiveChatImages(ctx, request.Credential, &parsed); err != nil {
 		return nil, err
 	}
@@ -550,10 +554,6 @@ func (a *Adapter) streamOpenAIResponse(ctx context.Context, source io.ReadCloser
 				}
 				if result.Complete {
 					if len(result.Calls) == 0 {
-						clientText.WriteString(result.Raw)
-						if err := writeDelta(kind, result.Raw); err != nil {
-							return err
-						}
 						return flushSideChannel()
 					}
 					parsed.ToolCalls = result.Calls
@@ -594,6 +594,10 @@ func (a *Adapter) streamOpenAIResponse(ctx context.Context, source io.ReadCloser
 					return
 				}
 			}
+		}
+		if tools.requiresFunctionCall() && len(parsed.ToolCalls) == 0 {
+			_ = writer.CloseWithError(errToolCallRequired)
+			return
 		}
 		if len(parsed.ToolCalls) == 0 {
 			for _, rawURL := range parsed.Images {
@@ -1341,17 +1345,25 @@ func webServerToolName(response map[string]any) string {
 	return strings.ToLower(strings.TrimSpace(name))
 }
 
-func applyParsedToolCalls(parsed *parsedChat, configuration toolConfiguration) {
+func applyParsedToolCalls(parsed *parsedChat, configuration toolConfiguration) error {
 	if len(configuration.Functions) == 0 || configuration.Choice == "none" {
-		return
+		return nil
 	}
 	result := parseToolCalls(parsed.Text.String(), configuration.available)
 	if len(result.Calls) == 0 {
-		return
+		if result.SawSyntax {
+			// Fail closed：模型产生了工具 XML 但没有合法调用时，剥离内部标记而不是泄露给客户端。
+			parsed.resetText(removeToolSyntax(parsed.Text.String(), result))
+		}
+		if configuration.requiresFunctionCall() {
+			return errToolCallRequired
+		}
+		return nil
 	}
 	cleaned := removeToolSyntax(parsed.Text.String(), result)
 	parsed.resetText(cleaned)
 	parsed.ToolCalls = result.Calls
+	return nil
 }
 
 func (a *Adapter) archiveChatImages(ctx context.Context, credential account.Credential, parsed *parsedChat) error {
