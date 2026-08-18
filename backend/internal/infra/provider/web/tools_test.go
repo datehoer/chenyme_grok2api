@@ -428,6 +428,42 @@ func TestToolStreamSievePreservesInvalidSyntaxAndTrailingText(t *testing.T) {
 	}
 }
 
+func TestToolStreamSieveBuffersIncrementalXMLWithoutLeaking(t *testing.T) {
+	sieve := newToolStreamSieve(map[string]struct{}{"get_weather": {}})
+	chunks := []string{
+		"<tool_calls>",
+		"<tool_call>",
+		"<tool_name>get_weather</tool_name>",
+		`<parameters>{"city":"Shanghai"}</parameters>`,
+		"</tool_call>",
+		"</tool_calls>",
+	}
+	var leaked strings.Builder
+	for _, chunk := range chunks {
+		result := sieve.Feed(chunk)
+		leaked.WriteString(result.SafeText)
+		if result.Complete {
+			if len(result.Calls) != 1 || result.Calls[0].Name != "get_weather" || result.Calls[0].Arguments != `{"city":"Shanghai"}` {
+				t.Fatalf("unexpected result: %#v", result)
+			}
+			if leaked.Len() != 0 {
+				t.Fatalf("XML leaked during streaming: %q", leaked.String())
+			}
+			return
+		}
+	}
+	t.Fatal("sieve never completed")
+}
+
+func TestToolStreamSieveFlushFailsClosedOnInvalidSyntax(t *testing.T) {
+	sieve := newToolStreamSieve(map[string]struct{}{"lookup": {}})
+	sieve.Feed("<tool_calls><tool_call><tool_name>unknown</tool_name>")
+	result := sieve.Flush()
+	if result.SafeText != "" || !result.Complete || len(result.Calls) != 0 {
+		t.Fatalf("invalid syntax leaked: %#v", result)
+	}
+}
+
 func TestSearchSourcesAndServerToolsAreDeduplicated(t *testing.T) {
 	parsed := &parsedChat{}
 	response := map[string]any{

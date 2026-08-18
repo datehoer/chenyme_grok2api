@@ -352,7 +352,11 @@ func (a *Adapter) ForwardResponse(ctx context.Context, request provider.Response
 	parsed.Tools = tools.ResponseTools
 	parsed.ToolChoice = tools.ResponseChoice
 	parsed.ParallelTools = parallelTools
-	applyParsedToolCalls(&parsed, tools)
+	if err := applyParsedToolCalls(&parsed, tools); err != nil {
+		return jsonProviderResponse(http.StatusUnprocessableEntity, map[string]any{"error": map[string]any{
+			"message": err.Error(), "type": "invalid_request_error", "code": "tool_call_required",
+		}}), nil
+	}
 	if err := a.archiveChatImages(ctx, request.Credential, &parsed); err != nil {
 		return nil, err
 	}
@@ -519,6 +523,21 @@ func (a *Adapter) streamOpenAIResponse(ctx context.Context, source io.ReadCloser
 			}
 			return flushAnnotations()
 		}
+		requiredCall := tools.requiresFunctionCall()
+		var deferredText strings.Builder
+		// emitText 统一路由客户端可见文本。required/强制函数模式下普通文本先暂存，
+		// 一旦解析到合法工具调用就丢弃，因此模型编造的普通回答绝不会发给客户端。
+		emitText := func(delta string) error {
+			if delta == "" {
+				return nil
+			}
+			if requiredCall {
+				deferredText.WriteString(delta)
+				return nil
+			}
+			clientText.WriteString(delta)
+			return writeDelta("text", delta)
+		}
 		if operation != conversation.OperationMessages {
 			writeStreamStart(writer, operation, responseID, model, parsed.InputTokens)
 		}
@@ -542,31 +561,24 @@ func (a *Adapter) streamOpenAIResponse(ctx context.Context, source io.ReadCloser
 			}
 			if kind == "text" && sieve != nil {
 				result := sieve.Feed(delta)
-				if result.SafeText != "" {
-					clientText.WriteString(result.SafeText)
-					if err := writeDelta(kind, result.SafeText); err != nil {
-						return err
-					}
+				if err := emitText(result.SafeText); err != nil {
+					return err
 				}
 				if result.Complete {
 					if len(result.Calls) == 0 {
-						clientText.WriteString(result.Raw)
-						if err := writeDelta(kind, result.Raw); err != nil {
-							return err
-						}
 						return flushSideChannel()
 					}
 					parsed.ToolCalls = result.Calls
+					deferredText.Reset()
 					return writeToolCalls(result.Calls)
 				}
 				return flushSideChannel()
 			}
 			if kind == "text" {
-				if delta != "" {
-					clientText.WriteString(delta)
+				if err := emitText(delta); err != nil {
+					return err
 				}
-			}
-			if delta != "" {
+			} else if delta != "" {
 				if err := writeDelta(kind, delta); err != nil {
 					return err
 				}
@@ -580,20 +592,25 @@ func (a *Adapter) streamOpenAIResponse(ctx context.Context, source io.ReadCloser
 		}
 		if sieve != nil && len(parsed.ToolCalls) == 0 {
 			result := sieve.Flush()
-			if result.SafeText != "" {
-				clientText.WriteString(result.SafeText)
-				if err := writeDelta("text", result.SafeText); err != nil {
-					_ = writer.CloseWithError(err)
-					return
-				}
+			if err := emitText(result.SafeText); err != nil {
+				_ = writer.CloseWithError(err)
+				return
 			}
 			if len(result.Calls) > 0 {
 				parsed.ToolCalls = result.Calls
+				deferredText.Reset()
 				if err := writeToolCalls(result.Calls); err != nil {
 					_ = writer.CloseWithError(err)
 					return
 				}
 			}
+		}
+		if validationErr := validateRequiredToolCall(tools, parsed.ToolCalls); validationErr != nil {
+			// 丢弃已暂存文本，发送协议级错误，不发送 response.completed / finish_reason=stop。
+			a.egress.Feedback(context.WithoutCancel(ctx), lease.NodeID, http.StatusOK, nil)
+			writeStreamToolCallRequiredError(writer, operation, responseID, validationErr)
+			_ = writer.Close()
+			return
 		}
 		if len(parsed.ToolCalls) == 0 {
 			for _, rawURL := range parsed.Images {
@@ -1341,17 +1358,30 @@ func webServerToolName(response map[string]any) string {
 	return strings.ToLower(strings.TrimSpace(name))
 }
 
-func applyParsedToolCalls(parsed *parsedChat, configuration toolConfiguration) {
+func applyParsedToolCalls(parsed *parsedChat, configuration toolConfiguration) error {
 	if len(configuration.Functions) == 0 || configuration.Choice == "none" {
-		return
+		return nil
 	}
 	result := parseToolCalls(parsed.Text.String(), configuration.available)
 	if len(result.Calls) == 0 {
-		return
+		if result.SawSyntax {
+			// Fail closed：模型产生了工具 XML 但没有合法调用时，剥离内部标记而不是泄露给客户端。
+			parsed.resetText(removeToolSyntax(parsed.Text.String(), result))
+		}
+		if configuration.requiresFunctionCall() {
+			return errToolCallRequired
+		}
+		return nil
 	}
-	cleaned := removeToolSyntax(parsed.Text.String(), result)
-	parsed.resetText(cleaned)
+	if configuration.requiresFunctionCall() {
+		// required/强制函数：丢弃工具调用前后的任何普通文本，只保留调用本身。
+		parsed.resetText("")
+	} else {
+		cleaned := removeToolSyntax(parsed.Text.String(), result)
+		parsed.resetText(cleaned)
+	}
 	parsed.ToolCalls = result.Calls
+	return nil
 }
 
 func (a *Adapter) archiveChatImages(ctx context.Context, credential account.Credential, parsed *parsedChat) error {
@@ -2629,6 +2659,34 @@ func writeStreamDone(writer io.Writer, operation, responseID, model string, pars
 		return
 	}
 	writeSSE(writer, "response.completed", map[string]any{"type": "response.completed", "response": payload})
+}
+
+// writeStreamToolCallRequiredError 在缺少强制工具调用时发送协议级错误并正常结束 SSE：
+// Responses 发 response.failed，Chat Completions 发 OpenAI 兼容 error 数据，Messages 发 error 事件。
+// 三种情况都不发送成功结束标记（response.completed / finish_reason=stop / message_stop）。
+func writeStreamToolCallRequiredError(writer io.Writer, operation, responseID string, err error) {
+	message := err.Error()
+	switch operation {
+	case conversation.OperationResponses:
+		writeSSE(writer, "response.failed", map[string]any{
+			"type": "response.failed",
+			"response": map[string]any{
+				"id": responseID, "object": "response", "status": "failed", "output": []any{},
+				"error": map[string]any{"code": "tool_call_required", "message": message},
+			},
+		})
+	case conversation.OperationMessages:
+		writeSSE(writer, "error", map[string]any{
+			"type":  "error",
+			"error": map[string]any{"type": "invalid_request_error", "code": "tool_call_required", "message": message},
+		})
+	default:
+		writeSSE(writer, "", map[string]any{
+			"type":  "error",
+			"error": map[string]any{"type": "invalid_request_error", "code": "tool_call_required", "message": message},
+		})
+		_, _ = io.WriteString(writer, "data: [DONE]\n\n")
+	}
 }
 
 // writeStreamAnnotations emits Chat Completions delta.annotations. Responses
