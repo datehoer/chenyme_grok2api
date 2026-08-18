@@ -13,6 +13,8 @@ import (
 const (
 	maxFunctionTools       = 128
 	maxToolDescriptionSize = 16 << 10
+	// maxFencePrefix 是 splitToolPrefix 用于识别 Markdown 代码围栏开头（可能不完整）的最大后缀长度。
+	maxFencePrefix = 16
 )
 
 var (
@@ -31,6 +33,65 @@ var (
 // errToolCallRequired 表示请求强制要求工具调用（tool_choice=required 或指定函数），
 // 但模型没有产生任何合法调用。调用方应把它当作明确错误处理，而不是静默返回普通文本。
 var errToolCallRequired = errors.New("tool_choice 要求调用工具，但模型没有返回合法的工具调用")
+
+// isFenceLanguage 判断 Markdown 代码围栏的语言标签是否属于我们接受的集合。
+func isFenceLanguage(value string) bool {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "", "xml", "html", "json":
+		return true
+	}
+	return false
+}
+
+// fenceOpenLine 判断一行是否为 Markdown 代码围栏开头（```、```xml、```html、```json）。
+func fenceOpenLine(line string) bool {
+	trimmed := strings.TrimSpace(line)
+	lower := strings.ToLower(trimmed)
+	if !strings.HasPrefix(lower, "```") {
+		return false
+	}
+	return isFenceLanguage(lower[len("```"):])
+}
+
+// stripTrailingFenceOpen 从 <tool_calls> 之前的文本中移除末尾的 Markdown 代码围栏开头行，
+// 避免把它作为普通文本发给客户端。
+func stripTrailingFenceOpen(value string) string {
+	trimmed := strings.TrimRight(value, " \t\r\n")
+	if trimmed == "" {
+		return value
+	}
+	if idx := strings.LastIndexByte(trimmed, '\n'); idx >= 0 {
+		last := trimmed[idx+1:]
+		if fenceOpenLine(last) {
+			return strings.TrimRight(trimmed[:idx], "\r\n")
+		}
+		return value
+	}
+	if fenceOpenLine(trimmed) {
+		return ""
+	}
+	return value
+}
+
+// fenceInProgress 判断 value 是否像一个尚未结束的 Markdown 代码围栏开头：
+// ``` 前缀 + 可选（可能不完整）的语言标签 + 仅尾部空白。
+func fenceInProgress(value string) bool {
+	trimmed := strings.TrimLeft(value, " \t\r\n")
+	if !strings.HasPrefix(trimmed, "```") {
+		return false
+	}
+	rest := trimmed[len("```"):]
+	i := 0
+	for i < len(rest) && i < len("html") && ((rest[i] >= 'a' && rest[i] <= 'z') || (rest[i] >= 'A' && rest[i] <= 'Z')) {
+		i++
+	}
+	for ; i < len(rest); i++ {
+		if rest[i] != ' ' && rest[i] != '\t' && rest[i] != '\r' && rest[i] != '\n' {
+			return false
+		}
+	}
+	return true
+}
 
 type functionTool struct {
 	Name        string
@@ -52,6 +113,26 @@ type toolConfiguration struct {
 // 与 injectToolPrompt 的强制提示词保持同一口径：强制函数名，或 required 且无托管搜索。
 func (c toolConfiguration) requiresFunctionCall() bool {
 	return c.ForcedName != "" || (c.Choice == "required" && !c.HostedWebSearch)
+}
+
+// validateRequiredToolCall 在所有流结束出口统一校验强制工具调用是否被满足：
+// required 必须至少产生一个合法调用；强制指定函数名时，调用里必须包含该函数。
+func validateRequiredToolCall(configuration toolConfiguration, calls []parsedToolCall) error {
+	if !configuration.requiresFunctionCall() {
+		return nil
+	}
+	if len(calls) == 0 {
+		return errToolCallRequired
+	}
+	if configuration.ForcedName != "" {
+		for _, call := range calls {
+			if call.Name == configuration.ForcedName {
+				return nil
+			}
+		}
+		return errToolCallRequired
+	}
+	return nil
 }
 
 type parsedToolCall struct {
@@ -423,7 +504,7 @@ func (s *toolStreamSieve) Feed(chunk string) toolStreamResult {
 		}
 		s.capturing = true
 		s.buffer = combined[index:]
-		combined = combined[:index]
+		combined = stripTrailingFenceOpen(combined[:index])
 	} else {
 		// 已进入捕获态：把新 chunk 追加回缓冲区并继续等待 </tool_calls>，
 		// 同时不向客户端输出任何文本。此前这里清空了 buffer 却仍用 buffer 搜索
@@ -473,6 +554,13 @@ func splitToolPrefix(value string) (string, string) {
 	for size := min(len(prefix)-1, len(lower)); size > 0; size-- {
 		if strings.HasSuffix(lower, prefix[:size]) {
 			return value[:len(value)-size], value[len(value)-size:]
+		}
+	}
+	// 暂存尾部可能尚未结束的 Markdown 代码围栏开头，避免围栏先于 <tool_calls> 到达时被泄露。
+	for size := min(maxFencePrefix, len(value)); size > 0; size-- {
+		candidate := value[len(value)-size:]
+		if fenceInProgress(candidate) {
+			return value[:len(value)-size], candidate
 		}
 	}
 	return value, ""
