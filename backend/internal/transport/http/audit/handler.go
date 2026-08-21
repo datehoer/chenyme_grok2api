@@ -43,6 +43,7 @@ type qualityGuardAuditResponse struct {
 	RequestID       string  `json:"requestId"`
 	QualityProbe    bool    `json:"qualityProbe"`
 	Provider        string  `json:"provider"`
+	AccountID       *uint64 `json:"accountId,string,omitempty"`
 	EgressNodeID    *uint64 `json:"egressNodeId,string,omitempty"`
 	EgressNodeName  string  `json:"egressNodeName,omitempty"`
 	StatusCode      int     `json:"statusCode"`
@@ -74,7 +75,7 @@ func (h *Handler) listQualityGuard(c *gin.Context) {
 	for _, value := range result.Items {
 		items = append(items, qualityGuardAuditResponse{
 			ID: value.ID, RequestID: value.RequestID, QualityProbe: value.ClientKeyID == h.qualityGuardClientKeyID,
-			Provider: value.Provider, EgressNodeID: value.EgressNodeID, EgressNodeName: value.EgressNodeName,
+			Provider: value.Provider, AccountID: value.AccountID, EgressNodeID: value.EgressNodeID, EgressNodeName: value.EgressNodeName,
 			StatusCode: value.StatusCode, Streaming: value.Streaming, OutputTokens: value.OutputTokens,
 			ReasoningTokens: value.ReasoningTokens, FirstTokenMS: value.FirstTokenMS,
 			DurationMS: value.DurationMS, ErrorCode: value.ErrorCode,
@@ -88,6 +89,7 @@ type auditResponse struct {
 	RequestID               string                    `json:"requestId"`
 	ClientKeyID             uint64                    `json:"clientKeyId,string"`
 	ClientKeyName           string                    `json:"clientKeyName,omitempty"`
+	ClientIP                string                    `json:"clientIp,omitempty"`
 	ModelRouteID            uint64                    `json:"modelRouteId,string"`
 	ModelPublicID           string                    `json:"modelPublicId,omitempty"`
 	ModelUpstreamModel      string                    `json:"modelUpstreamModel,omitempty"`
@@ -124,6 +126,9 @@ type auditResponse struct {
 	OutputTokensPerSecond   *float64                  `json:"outputTokensPerSecond,omitempty"`
 	DurationMS              int64                     `json:"durationMs"`
 	ErrorCode               string                    `json:"errorCode,omitempty"`
+	RequestMethod           string                    `json:"requestMethod,omitempty"`
+	RequestPath             string                    `json:"requestPath,omitempty"`
+	RequestHeaders          map[string][]string       `json:"requestHeaders,omitempty"`
 	AttemptCount            int                       `json:"attemptCount"`
 	CreatedAt               time.Time                 `json:"createdAt"`
 }
@@ -386,7 +391,7 @@ func (h *Handler) degradeAccounts(c *gin.Context) {
 		Totals: degradeTotalsResponse{
 			Hits: result.Totals.Hits, Accounts: result.Totals.Accounts, StillEnabled: result.Totals.StillEnabled,
 			Disabled: result.Totals.Disabled, Deleted: result.Totals.Deleted, Hard: result.Totals.Hard,
-			Soft: result.Totals.Soft, Burst: result.Totals.Burst, MaxTPS: result.Totals.MaxTPS,
+			Soft: result.Totals.Soft, Burst: result.Totals.Burst, Thinking: result.Totals.Thinking, MaxTPS: result.Totals.MaxTPS,
 		},
 		Series: result.Series, Nodes: result.Nodes, Accounts: accounts,
 		AccountPage: degradeAccountPageResponse{
@@ -432,6 +437,7 @@ type degradeTotalsResponse struct {
 	Hard         int64   `json:"hard"`
 	Soft         int64   `json:"soft"`
 	Burst        int64   `json:"burst"`
+	Thinking     int64   `json:"thinking"`
 	MaxTPS       float64 `json:"maxTPS"`
 }
 
@@ -471,8 +477,8 @@ func newListFilter(c *gin.Context) auditapp.ListFilter {
 }
 
 func newAuditResponse(value auditdomain.Record) auditResponse {
-	return auditResponse{
-		ID: value.ID, RequestID: value.RequestID, ClientKeyID: value.ClientKeyID, ClientKeyName: value.ClientKeyName,
+	result := auditResponse{
+		ID: value.ID, RequestID: value.RequestID, ClientKeyID: value.ClientKeyID, ClientKeyName: value.ClientKeyName, ClientIP: value.ClientIP,
 		ModelRouteID: value.ModelRouteID, ModelPublicID: value.ModelPublicID, ModelUpstreamModel: value.ModelUpstreamModel,
 		Provider: value.Provider, Operation: string(value.Operation), UsageSource: string(value.UsageSource),
 		ReasoningEffort: value.ReasoningEffort,
@@ -487,8 +493,11 @@ func newAuditResponse(value auditdomain.Record) auditResponse {
 		NumSourcesUsed: value.NumSourcesUsed, NumServerSideToolsUsed: value.NumServerSideToolsUsed,
 		ContextInputTokens: value.ContextInputTokens, ContextOutputTokens: value.ContextOutputTokens,
 		FirstTokenMS: value.FirstTokenMS, OutputTokensPerSecond: auditOutputTokensPerSecond(value), DurationMS: value.DurationMS,
-		ErrorCode: value.ErrorCode, AttemptCount: value.AttemptCount, CreatedAt: value.CreatedAt,
+		ErrorCode: value.ErrorCode, RequestMethod: value.RequestMethod, RequestPath: value.RequestPath, RequestHeaders: value.RequestHeaders,
+		AttemptCount: value.AttemptCount,
+		CreatedAt:    value.CreatedAt,
 	}
+	return result
 }
 
 func newBillingBreakdown(value auditdomain.Record) *billingBreakdownResponse {

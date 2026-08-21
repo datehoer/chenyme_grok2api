@@ -28,6 +28,7 @@ export type AuditDTO = {
   requestId: string;
   clientKeyId: string;
   clientKeyName?: string;
+  clientIp?: string;
   modelRouteId: string;
   modelPublicId?: string;
   modelUpstreamModel?: string;
@@ -65,6 +66,9 @@ export type AuditDTO = {
   outputTokensPerSecond?: number;
   durationMs: number;
   errorCode?: string;
+  requestMethod?: string;
+  requestPath?: string;
+  requestHeaders?: Record<string, string[]>;
   attemptCount: number;
   createdAt: string;
 };
@@ -140,7 +144,7 @@ const auditBillingValidator = hasShape({
   components: isArrayOf(auditBillingComponentValidator), totalInUsdTicks: isNumber,
 });
 const auditValidator = hasShape({
-  id: isString, requestId: isString, clientKeyId: isString, clientKeyName: isOptional(isString), modelRouteId: isString,
+  id: isString, requestId: isString, clientKeyId: isString, clientKeyName: isOptional(isString), clientIp: isOptional(isString), modelRouteId: isString,
   modelPublicId: isOptional(isString), modelUpstreamModel: isOptional(isString), provider: isOneOf("grok_build", "grok_web", "grok_console"),
   operation: isOneOf("responses", "compaction", "chat", "messages", "image", "image_edit", "video", "tts", "stt", "realtime", "voice"), usageSource: isOneOf("upstream", "estimated", "none"),
   reasoningEffort: isOptional(isOneOf("auto", "none", "low", "medium", "high", "xhigh", "fixed")),
@@ -153,7 +157,8 @@ const auditValidator = hasShape({
   costInUsdTicks: isNumber, estimatedCostInUsdTicks: isNumber, pricingModel: isOptional(isString), pricingVersion: isOptional(isString), billing: isOptional(auditBillingValidator),
   numSourcesUsed: isNumber, numServerSideToolsUsed: isNumber, contextInputTokens: isNumber, contextOutputTokens: isNumber,
   firstTokenMs: isOptional(isNumber), outputTokensPerSecond: isOptional(isNumber),
-  durationMs: isNumber, errorCode: isOptional(isString), attemptCount: isNumber, createdAt: isString,
+  durationMs: isNumber, errorCode: isOptional(isString), requestMethod: isOptional(isString), requestPath: isOptional(isString),
+  requestHeaders: isOptional(isRecordOf(isArrayOf(isString))), attemptCount: isNumber, createdAt: isString,
 });
 const auditAttemptValidator = hasShape({
   id: isString, number: isNumber, source: isOneOf("upstream_http", "gateway_transport", "credential"), stage: isString,

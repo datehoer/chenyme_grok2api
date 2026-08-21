@@ -76,6 +76,7 @@ type Record struct {
 	RequestID               string
 	ClientKeyID             uint64
 	ClientKeyName           string
+	ClientIP                string
 	ModelRouteID            uint64
 	ModelPublicID           string
 	ModelUpstreamModel      string
@@ -110,6 +111,9 @@ type Record struct {
 	FirstTokenMS            *int64
 	DurationMS              int64
 	ErrorCode               string
+	RequestMethod           string
+	RequestPath             string
+	RequestHeaders          map[string][]string
 	AttemptCount            int
 	Attempts                []Attempt
 	CreatedAt               time.Time

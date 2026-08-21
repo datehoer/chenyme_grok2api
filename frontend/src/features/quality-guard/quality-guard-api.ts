@@ -14,6 +14,9 @@ export type QualityGuardPolicy = {
 };
 
 export type QualityGuardNodeState = {
+  observe_only?: boolean;
+  observe_only_reason?: string;
+  quarantined_lease_count?: number;
   active_soft_strikes: number;
   passive_soft_strikes: number;
   error_strikes: number;
@@ -35,9 +38,12 @@ export type QualityGuardEvent = {
   event: string;
   node_id: string;
   node_name: string;
+  account_id?: string;
+  request_id?: string;
   reason: string;
   classification: string;
   output_tps: number;
+  cooldown_until?: number;
 };
 
 export type QualityGuardDetectionStats = {
@@ -122,6 +128,7 @@ export type QualityTestResult = {
 };
 
 const nodeStateValidator = hasShape({
+  observe_only: isOptional(isBoolean), observe_only_reason: isOptional(isString), quarantined_lease_count: isOptional(isNumber),
   active_soft_strikes: isNumber, passive_soft_strikes: isNumber, error_strikes: isNumber,
   quarantined_until: isNumber, disabled_by_guard: isBoolean, last_reason: isString,
   last_probe_at: isNumber, last_observed_at: isNumber, last_source: isString,
@@ -130,7 +137,9 @@ const nodeStateValidator = hasShape({
 });
 const eventValidator = hasShape({
   ts: isNumber, event: isString, node_id: isString, node_name: isString,
+  account_id: isOptional(isString), request_id: isOptional(isString),
   reason: isString, classification: isString, output_tps: isNumber,
+  cooldown_until: isOptional(isNumber),
 });
 const configValidator = hasShape({
   mode: isOneOf("active", "passive", "hybrid"), model: isString,
@@ -220,7 +229,7 @@ export function updateQualityGuardPolicy(policy: QualityGuardPolicy): Promise<{ 
 }
 
 export type DegradeWindow = "1h" | "6h" | "24h" | "7d";
-export type DegradeClass = "buffered_burst" | "soft_tps" | "hard_tps";
+export type DegradeClass = "buffered_burst" | "soft_tps" | "hard_tps" | "missing_thinking";
 
 export type DegradeAccountDTO = {
   id: string;
@@ -253,7 +262,7 @@ export type DegradeSummaryDTO = {
   window: DegradeWindow;
   generatedAt: string;
   thresholds: { softTPS: number; hardTPS: number; minGenMs: number; minOutputTokens: number };
-  totals: { hits: number; accounts: number; stillEnabled: number; disabled: number; deleted: number; hard: number; soft: number; burst: number; maxTPS: number };
+  totals: { hits: number; accounts: number; stillEnabled: number; disabled: number; deleted: number; hard: number; soft: number; burst: number; thinking: number; maxTPS: number };
   series: { label: string; count: number; severe: number }[];
   nodes: { name: string; hits: number; accounts: number; maxTPS: number }[];
   accounts: DegradeAccountDTO[];
@@ -261,13 +270,13 @@ export type DegradeSummaryDTO = {
   events: DegradeEventDTO[];
 };
 
-const degradeClassValidator = isOneOf("buffered_burst", "soft_tps", "hard_tps");
+const degradeClassValidator = isOneOf("buffered_burst", "soft_tps", "hard_tps", "missing_thinking");
 
 const decodeDegradeSummary = createObjectDecoder<DegradeSummaryDTO>("degrade accounts", {
   window: isOneOf("1h", "6h", "24h", "7d"),
   generatedAt: isString,
   thresholds: hasShape({ softTPS: isNumber, hardTPS: isNumber, minGenMs: isNumber, minOutputTokens: isNumber }),
-  totals: hasShape({ hits: isNumber, accounts: isNumber, stillEnabled: isNumber, disabled: isNumber, deleted: isNumber, hard: isNumber, soft: isNumber, burst: isNumber, maxTPS: isNumber }),
+  totals: hasShape({ hits: isNumber, accounts: isNumber, stillEnabled: isNumber, disabled: isNumber, deleted: isNumber, hard: isNumber, soft: isNumber, burst: isNumber, thinking: isNumber, maxTPS: isNumber }),
   series: isArrayOf(hasShape({ label: isString, count: isNumber, severe: isNumber })),
   nodes: isArrayOf(hasShape({ name: isString, hits: isNumber, accounts: isNumber, maxTPS: isNumber })),
   accounts: isArrayOf(hasShape({

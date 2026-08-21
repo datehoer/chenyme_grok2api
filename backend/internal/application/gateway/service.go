@@ -32,6 +32,7 @@ import (
 	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"github.com/chenyme/grok2api/backend/internal/infra/security"
 	neterrorpkg "github.com/chenyme/grok2api/backend/internal/pkg/neterror"
+	"github.com/chenyme/grok2api/backend/internal/pkg/requestmeta"
 	"github.com/chenyme/grok2api/backend/internal/repository"
 )
 
@@ -73,6 +74,13 @@ func newRoutingAttemptPolicy(configured int) routingAttemptPolicy {
 	return routingAttemptPolicy{limit: configured}
 }
 
+func newRequestRoutingAttemptPolicy(configured int, pinned bool) routingAttemptPolicy {
+	if pinned {
+		return newRoutingAttemptPolicy(1)
+	}
+	return newRoutingAttemptPolicy(configured)
+}
+
 func (p routingAttemptPolicy) allows(attempt int) bool {
 	return p.unlimited || attempt < p.limit
 }
@@ -107,9 +115,20 @@ type Input struct {
 	// GrokTurnIndex forwards only the turn supplied by a real Grok Shell client; the server never infers or increments it.
 	GrokTurnIndex string
 	Operation     audit.Operation
+	Method        string
+	Path          string
+	Headers       map[string][]string
+	// auditOperation may classify a normal protocol request differently for
+	// operator visibility without changing routing or Provider semantics.
+	auditOperation audit.Operation
+	// skipQualityHold is set only by trusted gateway-side request classifiers.
+	skipQualityHold bool
 	// ForcedEgressNodeID is an internal-only administrator probe constraint.
 	// Public inference handlers never populate it.
 	ForcedEgressNodeID uint64
+	// ForcedAccountID is paired with ForcedEgressNodeID only by the internal
+	// Quality Guard recovery path. It never accepts public request input.
+	ForcedAccountID uint64
 }
 
 type Usage struct {
@@ -117,7 +136,10 @@ type Usage struct {
 	// zero value used when a response fails before usage is available. Token
 	// counts may legitimately all be zero, so the numeric fields cannot carry
 	// this presence information by themselves.
-	Reported               bool
+	Reported bool
+	// OutputObserved records that the transport actually forwarded generated
+	// content even when an interrupted upstream never emitted final usage.
+	OutputObserved         bool
 	InputTokens            int64
 	CachedInputTokens      int64
 	OutputTokens           int64
@@ -454,7 +476,9 @@ func (s *Service) UpdateMaxAttempts(maxAttempts int) { s.maxAttempts.Store(int64
 
 // UpdateVideoMaxAttempts configures create-phase account failover for video jobs.
 // 0 is treated as the general default pool size for legacy configs.
-func (s *Service) UpdateVideoMaxAttempts(maxAttempts int) { s.videoMaxAttempts.Store(int64(maxAttempts)) }
+func (s *Service) UpdateVideoMaxAttempts(maxAttempts int) {
+	s.videoMaxAttempts.Store(int64(maxAttempts))
+}
 
 // UpdateMarkBuildChatDeniedAsReauth 热更新 Build chat 永久拒绝是否标 reauthRequired。
 // 默认 false：仅模型级冷却；true 时按旧逻辑将账号标为失效并出池。
@@ -487,8 +511,15 @@ func (s *Service) checkLedgerReady() error {
 
 func (s *Service) CreateResponse(ctx context.Context, input Input) (*Result, error) {
 	input.Operation = audit.OperationResponses
-	if isResponsesCompactionRequest(input.Body) {
+	switch classifyResponsesCompactionRequest(input.Body) {
+	case responsesCompactionTrigger:
 		input.Operation = audit.OperationCompaction
+	case responsesCompactionTUI:
+		// Grok TUI compaction is still a normal Responses request. Keep its
+		// routing, Provider normalization, and stored-response behavior intact;
+		// only its audit classification and quality-hold policy differ.
+		input.auditOperation = audit.OperationCompaction
+		input.skipQualityHold = true
 	}
 	return s.createResponseAt(ctx, input, "/responses")
 }
@@ -821,6 +852,10 @@ func (s *Service) createResponseAt(ctx context.Context, input Input, path string
 	if operation == "" {
 		operation = audit.OperationResponses
 	}
+	auditOperation := operation
+	if input.auditOperation != "" {
+		auditOperation = input.auditOperation
+	}
 	routes, aliasEffort, err := s.resolvePublicModelRoutes(ctx, input.PublicModel, input.ClientKey.AllowModelAliases)
 	if err != nil {
 		return nil, ErrModelNotFound
@@ -917,9 +952,11 @@ func (s *Service) createResponseAt(ctx context.Context, input Input, path string
 	logResponseMediaSummary(s.logger, input.RequestID, mediaSummary)
 	auditBase := audit.Record{
 		EventID: eventID, RequestID: input.RequestID, ClientKeyID: input.ClientKey.ID, ClientKeyName: input.ClientKey.Name,
+		ClientIP:     requestmeta.ClientIP(ctx),
 		ModelRouteID: route.ID, ModelPublicID: publicModel, ModelUpstreamModel: modeldomain.DisplayUpstreamModel(route.Provider, route.UpstreamModel),
-		Provider: string(route.Provider), Operation: operation, UsageSource: audit.UsageSourceNone, Streaming: input.Streaming,
+		Provider: string(route.Provider), Operation: auditOperation, UsageSource: audit.UsageSourceNone, Streaming: input.Streaming,
 		MediaInputImages: mediaSummary.InputImages,
+		RequestMethod:    input.Method, RequestPath: input.Path, RequestHeaders: input.Headers,
 	}
 	if errors.Is(routeErr, clientkeyapp.ErrModelNotAllowed) {
 		record := auditBase
@@ -978,11 +1015,11 @@ func (s *Service) createResponseAt(ctx context.Context, input Input, path string
 	if input.PreviousResponseID != "" && !supportsStoredResponses {
 		return nil, ErrResponseStateUnsupported
 	}
-	attemptPolicy := newRoutingAttemptPolicy(int(s.maxAttempts.Load()))
+	// A lease recovery probe stays on exactly one account and one rendered proxy
+	// identity. Retrying the same pinned account would provide neither failover
+	// nor new evidence and can multiply a slow/failing probe.
+	attemptPolicy := newRequestRoutingAttemptPolicy(int(s.maxAttempts.Load()), ownership != nil || input.ForcedAccountID != 0)
 	idempotencyID, _ := security.NewOpaqueToken(18)
-	if ownership != nil {
-		attemptPolicy = newRoutingAttemptPolicy(1)
-	}
 	pricingModel := s.providers.PricingModel(route.Provider, route.UpstreamModel)
 	if err := s.checkLedgerReady(); err != nil {
 		return nil, err
@@ -1036,8 +1073,9 @@ func (s *Service) createResponseAt(ctx context.Context, input Input, path string
 				lease.completeSelectorObservation(successful)
 				budget := newFinalizationBudget(string(operation), string(route.Provider))
 				if isUpstreamStreamFailure(errorCode) {
+					status, retryAfter := streamFailureHealthPenalty(errorCode, usage, s.qualityRetryConfig().IdleAccountCooldown)
 					if err := budget.run("account_health", finalizationHealthBudget, func(stageCtx context.Context) error {
-						return s.selector.MarkFailureAfterSuccess(stageCtx, credential, 0, 0)
+						return s.selector.MarkFailureAfterSuccess(stageCtx, credential, status, retryAfter)
 					}); err != nil {
 						s.logger.Warn("stream_failure_health_write_failed", "account_id", credential.ID, "provider", credential.Provider, "error", err)
 					}
@@ -1081,6 +1119,25 @@ func (s *Service) createResponseAt(ctx context.Context, input Input, path string
 				record.DurationMS = time.Since(startedAt).Milliseconds()
 				record.ErrorCode = errorCode
 				attempts := failureAttempts.snapshot()
+				if !successful && len(attempts) == 0 {
+					statusCode := response.StatusCode
+					failureAttempts.append(audit.Attempt{
+						Source:             audit.AttemptSourceUpstreamHTTP,
+						Stage:              "response_stream",
+						AccountID:          auditAccountID(credential.ID),
+						AccountName:        credential.Name,
+						Method:             http.MethodPost,
+						RequestPath:        sanitizeRequestPath(path),
+						UpstreamURL:        sanitizeUpstreamURL(response.UpstreamURL),
+						StartedAt:          upstreamStartedAt.UTC(),
+						DurationMS:         time.Since(upstreamStartedAt).Milliseconds(),
+						UpstreamStatusCode: &statusCode,
+						UpstreamStatus:     response.Status,
+						ResponseHeaders:    sanitizeDiagnosticHeaders(response.Header),
+						TransportError:     errorCode,
+					})
+					attempts = failureAttempts.snapshot()
+				}
 				if !successful || len(attempts) > 0 {
 					record.Attempts = attempts
 				}
@@ -1173,7 +1230,18 @@ attemptLoop:
 		var lease *accountLease
 		var err error
 		selectionStarted := time.Now()
-		if ownership != nil {
+		if input.ForcedAccountID != 0 {
+			if input.ForcedEgressNodeID == 0 {
+				err = &SelectionUnavailableError{Reason: SelectionNoAccounts}
+			} else {
+				lease, err = s.selector.AcquirePinnedForQualityProbe(ctx, route.Provider, input.ForcedAccountID, route.ID, route.UpstreamModel, quotaMode, accountScope)
+				if err == nil && lease.Credential.EgressNodeID != input.ForcedEgressNodeID {
+					lease.Release()
+					lease = nil
+					err = &SelectionUnavailableError{Reason: SelectionNoAccounts}
+				}
+			}
+		} else if ownership != nil {
 			lease, err = s.selector.AcquirePinnedForKey(ctx, route.Provider, ownership.AccountID, route.ID, route.UpstreamModel, quotaMode, true, accountScope)
 		} else if input.ForcedEgressNodeID != 0 {
 			lease, err = s.selector.AcquireForKeyOnEgressNode(ctx, route.Provider, route.ID, route.UpstreamModel, quotaMode, affinityKey, excluded, !quotaProbeAttempted, accountScope, input.ForcedEgressNodeID)
@@ -1205,7 +1273,7 @@ attemptLoop:
 			// Stored Responses are pinned to one account. Return the cached 429
 			// immediately instead of spinning until the cooldown expires or
 			// replaying the request on the same account.
-			if ownership != nil {
+			if ownership != nil || input.ForcedAccountID != 0 {
 				break attemptLoop
 			}
 			attempt--
@@ -1501,17 +1569,36 @@ attemptLoop:
 					}
 					lease.Release()
 					lastErr = peekErr
-					if ctx.Err() != nil || errors.Is(peekErr, context.Canceled) {
+					if isClientRequestCancel(ctx, peekErr) {
 						lastFailure = &UpstreamFailure{HTTPStatus: 499, Code: "request_canceled", PublicMessage: "请求已取消", AccountID: credential.ID, AccountName: credential.Name, Cause: firstError(ctx.Err(), peekErr)}
 						break
 					}
 					lastFailure = newTransportUpstreamFailure(peekErr, credential.ID, credential.Name)
+					if neterrorpkg.IsUpstreamStreamIdleTimeout(peekErr) || neterrorpkg.IsUpstreamStreamIdleTimeout(context.Cause(ctx)) || errors.Is(peekErr, errQualityEmptyStream) {
+						logPrefix := "quality_peek_idle"
+						if errors.Is(peekErr, errQualityEmptyStream) {
+							logPrefix = "quality_peek_empty"
+						}
+						writeCtx, writeCancel := context.WithTimeout(context.WithoutCancel(ctx), finalizationTimeout)
+						if markErr := s.selector.MarkFailureAfterSuccess(writeCtx, credential, http.StatusGatewayTimeout, holdCfg.IdleAccountCooldown); markErr != nil {
+							s.logger.Warn(logPrefix+"_cooldown_failed", "request_id", input.RequestID, "account_id", credential.ID, "error", markErr)
+						} else {
+							s.logger.Warn(logPrefix+"_retry", "request_id", input.RequestID, "account_id", credential.ID, "cooldown", holdCfg.IdleAccountCooldown)
+						}
+						writeCancel()
+					}
+					if shouldStopForNonAccountFingerprint(failureFingerprints, lastFailure) {
+						break
+					}
 					continue
 				}
 				response.Body = replay
 				hasNextAccount := attemptPolicy.hasNext(attempt) && selection.hasAvailableCandidate(excluded, !quotaProbeAttempted)
 				hasNextAccount = hasNextAccount && qualityAccountAttempts < holdCfg.MaxAttempts
 				commit := CommitQualityHold(verdict, qualityAccountAttempts-1, holdCfg.MaxAttempts, hasNextAccount, holdCfg.OnExhausted)
+				if verdict == QualityWithhold {
+					s.applyMissingThinkingPenalty(ctx, input.RequestID, credential, holdCfg.AccountCooldown)
+				}
 				deferFailOpenAudit := commit.Action == QualityActionRetry && holdCfg.OnExhausted == qualityRetryFailOpen
 				if commit.Audit && !deferFailOpenAudit {
 					s.recordQualityDegraded(ctx, auditBase, credential, peekUsage, startedAt, egressTrace, route.Provider)
@@ -1634,11 +1721,21 @@ attemptLoop:
 
 func isUpstreamStreamFailure(errorCode string) bool {
 	switch errorCode {
-	case "upstream_stream_incomplete", "upstream_stream_interrupted":
+	case "upstream_stream_incomplete", "upstream_stream_interrupted", "upstream_stream_idle_timeout":
 		return true
 	default:
 		return false
 	}
+}
+
+func streamFailureHealthPenalty(errorCode string, usage Usage, idleCooldown time.Duration) (int, time.Duration) {
+	if errorCode == "upstream_stream_idle_timeout" && !usage.OutputObserved && usage.OutputTokens == 0 && usage.ReasoningTokens == 0 {
+		if idleCooldown <= 0 {
+			idleCooldown = qualityIdleAccountCooldown
+		}
+		return http.StatusGatewayTimeout, idleCooldown
+	}
+	return 0, 0
 }
 
 // auditRequestSucceeded keeps transport truth (the HTTP status) separate from
@@ -1937,7 +2034,7 @@ func shouldStopForNonAccountFingerprint(fingerprints map[string]int, failure *Up
 	}
 	fingerprints[failure.Fingerprint]++
 	limit := nonAccountFailureFingerprintLimit
-	if failure.Code == "upstream_stream_idle_timeout" || failure.Fingerprint == "upstream_stream_idle_timeout" {
+	if failure.Code == "upstream_stream_idle_timeout" || failure.Fingerprint == "upstream_stream_idle_timeout" || failure.Code == "upstream_stream_empty" || failure.Fingerprint == "upstream_stream_empty" {
 		limit = streamIdleFailureFingerprintLimit
 	}
 	return fingerprints[failure.Fingerprint] >= limit

@@ -1,5 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
-import { Activity, ArrowDown, ArrowUp, BrainCircuit, CircleCheck, CircleDollarSign, CornerDownRight, Database, Info, Minimize2, RefreshCw, Search, WholeWord, type LucideIcon } from "lucide-react";
+import { Activity, ArrowDown, ArrowUp, BrainCircuit, CircleCheck, CircleDollarSign, CornerDownRight, Database, Globe2, Info, Minimize2, RefreshCw, Search, WholeWord, type LucideIcon } from "lucide-react";
 import { memo, useCallback, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
@@ -323,6 +323,7 @@ const AuditRow = memo(function AuditRow({ audit, locale, onOpen }: { audit: Audi
           upstreamModel={audit.modelUpstreamModel || "-"}
           account={audit.accountName || (audit.accountId ? `#${audit.accountId}` : "-")}
           clientKey={audit.clientKeyName || `#${audit.clientKeyId}`}
+          clientIp={audit.clientIp}
           requestId={audit.requestId}
           provider={audit.provider}
           operation={audit.operation}
@@ -529,11 +530,12 @@ function AuditTokenMetric({ icon: Icon, label, value, loading }: { icon: LucideI
   );
 }
 
-function ModelRouteValue({ model, upstreamModel, account, clientKey, requestId, provider, operation, sources }: {
+function ModelRouteValue({ model, upstreamModel, account, clientKey, clientIp, requestId, provider, operation, sources }: {
   model: string;
   upstreamModel: string;
   account: string;
   clientKey: string;
+  clientIp?: string;
   requestId: string;
   provider: AuditDTO["provider"];
   operation: AuditDTO["operation"];
@@ -549,11 +551,18 @@ function ModelRouteValue({ model, upstreamModel, account, clientKey, requestId, 
             <CornerDownRight className="size-3 shrink-0" />
             <span className="truncate" title={upstreamModel}>{upstreamModel}</span>
           </span>
+          {clientIp ? (
+            <span className="mt-0.5 flex min-w-0 items-center gap-1 text-[10px] text-muted-foreground/80">
+              <Globe2 className="size-3 shrink-0" />
+              <span className="truncate font-mono" title={clientIp}>{clientIp}</span>
+            </span>
+          ) : null}
         </button>
       </TooltipTrigger>
       <TooltipContent className="w-72 max-w-[calc(100vw-2rem)] space-y-1.5 py-2" side="top" align="start">
         <RouteDetailRow label={t("audits.channelProtocol")} value={`${providerLabel(provider)} · ${auditProtocolLabel(operation)}`} />
         <RouteDetailRow label={t("audits.requestId")} value={requestId} breakAll />
+        {clientIp ? <RouteDetailRow label={t("audits.clientIp")} value={clientIp} breakAll /> : null}
         <RouteDetailRow label={t("audits.actualModel")} value={upstreamModel} breakAll />
         <RouteDetailRow label={t("audits.owningAccount")} value={account} />
         <RouteDetailRow label={t("audits.owningKey")} value={clientKey} />
@@ -696,14 +705,20 @@ function AuditStatus({ audit, onOpen }: { audit: AuditDTO; onOpen: () => void })
       <span className="block whitespace-nowrap text-[10px] text-muted-foreground">{mode}</span>
     </>
   );
-  if (!audit.errorCode && audit.attemptCount === 0) return <div className="space-y-0.5 text-center">{content}</div>;
   return (
     <Tooltip>
       <TooltipTrigger asChild>
-        <button type="button" className="group space-y-0.5 rounded-md text-center outline-none focus-visible:ring-2 focus-visible:ring-ring/50 [&>span:last-child]:underline-offset-2 hover:[&>span:last-child]:text-foreground hover:[&>span:last-child]:underline" aria-label={t("audits.openDiagnostics")} onClick={onOpen}>{content}</button>
+        <button
+          type="button"
+          className="group inline-flex flex-col items-center justify-center space-y-0.5 rounded-md px-2 py-1 text-center outline-none transition-colors hover:bg-muted/80 focus-visible:ring-2 focus-visible:ring-ring/50 [&>span:last-child]:underline-offset-2 hover:[&>span:last-child]:text-foreground hover:[&>span:last-child]:underline cursor-pointer"
+          aria-label={t("audits.viewDetails")}
+          onClick={onOpen}
+        >
+          {content}
+        </button>
       </TooltipTrigger>
       <TooltipContent className="max-w-80 whitespace-normal break-words text-left leading-5" side="top">
-        {audit.errorCode || t("audits.openDiagnostics")}
+        {audit.errorCode || t("audits.viewDetails")}
       </TooltipContent>
     </Tooltip>
   );

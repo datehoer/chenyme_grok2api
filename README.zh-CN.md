@@ -350,7 +350,7 @@ curl http://127.0.0.1:8000/v1/responses \
 - 代理池模式，单次连接失败不会触发全局冷却
 - 固定代理传输失败后立即复测；同节点复测自动合并，后续绑定请求限时等待并在恢复后快速重试
 - 可选的[出口质量守护程序](./tools/egress-quality-guard/README.zh-CN.md)，支持逐节点模型探测、防误杀隔离和自动恢复；通过内置的 `quality-guard` Compose profile 按需启用
-- 固定 sticky 会话应各自建成独立节点（`proxyPool=false`）。不要把多条 sticky 合成一个节点，否则质量守护只能整组摘流，无法定位坏会话
+- 代理用户名包含 `{account}` 的节点会被识别为租约级节点：被动审计异常只会临时移出对应的账号租约，冷却后固定使用同一账号和节点复测，复测异常会续期；若 sidecar 不可用，已到期的隔离不会继续阻断路由，避免孤儿状态永久卡住账号。共享节点始终不会因此停用，也不会暴露渲染后的代理身份。普通固定 sticky 会话仍可按独立节点管理
 
 Hysteria 与 TUIC 暂未支持。FlareSolverr 仅接受 HTTP/SOCKS 代理地址，因此自动刷新 Clearance 暂不能直接使用隧道分享链接。
 
@@ -359,17 +359,21 @@ Hysteria 与 TUIC 暂未支持。FlareSolverr 仅接受 HTTP/SOCKS 代理地址�
 ```yaml
 qualityGuard:
   enabled: true
-  model: "grok-4.5"
-  # 可选：思考模型缺 reasoning 时先扣住响应，换号再打，不把降智正文发给用户。
+  model: "grok-4.6"
+  # 思考模型缺流式 reasoning 时先扣住响应，换号再打，不把降智正文发给用户。
+  # 最多观察 30 秒；已有 reasoning 起始信号和可见输出的进行中流会在超时后放行，
+  # 空流和终态仍无 thinking 的响应继续换号。
   requestRetry:
-    enabled: false
+    enabled: true
     maxAttempts: 6
-    holdTimeout: 3s
-    minOutputTokens: 32
+    holdTimeout: 30s
+    minOutputTokens: 8
     onExhausted: fail_closed # fail_open | fail_closed
+    accountCooldown: 12h
+    idleAccountCooldown: 15m
 ```
 
-`requestRetry` 在网关请求路径上生效，与 sidecar 探测/隔离相互独立。默认关闭。开启后，可见输出达到 `minOutputTokens` 且全程无 reasoning 时**不发给用户**，排除该账号再试；全部仍无推理则按 `onExhausted` 返回 `503 quality_degraded` 或放出最后一枪。不处理图/视频/工具、stored response 钉账号和 ForcedEgress 探针。
+`requestRetry` 在网关请求路径上生效，与 sidecar 探测/隔离相互独立。示例配置默认开启。开启后，可见输出达到 `minOutputTokens` 且全程无流式 reasoning 时**不发给用户**，排除该账号再试；全部仍无推理则按 `onExhausted` 返回 `503 quality_degraded` 或放出最后一枪。不处理图/视频、stored response 钉账号和 ForcedEgress 探针。Grok TUI 带 tools 的回合仍会 hold，避免 0-thinking 降智流跳过闸门。
 
 ```bash
 docker compose --profile quality-guard up -d --build
@@ -424,6 +428,42 @@ GROK2API_DATABASE_URL='postgresql://user:password@host:5432/grok2api?sslmode=req
 ```
 
 非空的 `GROK2API_DATABASE_URL` 会覆盖 `database.postgres.dsn` 并自动选择 `postgres`；空值不会覆盖 YAML。支持 `postgres://` 和 `postgresql://`，SQLAlchemy 的 `postgresql+asyncpg://` 会返回格式迁移提示。程序不会隐式读取通用的 `DATABASE_URL`；平台只提供该变量时，可在部署清单中显式映射为 `GROK2API_DATABASE_URL: "${DATABASE_URL}"`。数据库配置优先级为：内置默认值 < `config.yaml` < `GROK2API_DATABASE_URL`。当前 CLI 没有数据库覆盖参数。
+
+### 反向代理后的客户端 IP
+
+请求审计会记录规范化的客户端 IPv4 或 IPv6 地址。客户端直连 grok2api 时无需额外配置；经过 Nginx 等反向代理时，需要同时配置代理和 grok2api：
+
+1. 在 Nginx 中转发标准客户端 IP 请求头：
+
+```nginx
+location / {
+    proxy_pass http://127.0.0.1:8000;
+
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+}
+```
+
+2. 在 `config.yaml` 中仅信任 Nginx 的实际地址或隔离网络：
+
+```yaml
+server:
+  trustedProxies:
+    - "127.0.0.1"
+```
+
+使用 Docker 时，grok2api 看到的对端可能是网桥网关或另一个容器，而不是 `127.0.0.1`。配置前可查询 Compose 网络：
+
+```bash
+docker network inspect grok2api_default \
+  --format '{{(index .IPAM.Config 0).Subnet}}'
+```
+
+例如隔离网络返回 `172.20.0.0/16` 时，可以将该 CIDR 配置为可信代理。不要使用 `0.0.0.0/0` 或 `::/0`；grok2api 会拒绝不受限的可信代理范围。未配置 `trustedProxies` 时，所有转发头都会被忽略，审计记录 TCP 直连对端地址，从而避免客户端伪造 `X-Forwarded-For`。
+
+如果 Nginx 前还有 Cloudflare，应先使用 Cloudflare 官方代理网段和 `CF-Connecting-IP` 正确配置 Nginx real-IP 模块，不要信任任意来源提供的 `CF-Connecting-IP`。修改 `server.trustedProxies` 后需要重启 grok2api；修改 Nginx 配置后需要重新加载 Nginx。
 
 重要的可选设置：
 

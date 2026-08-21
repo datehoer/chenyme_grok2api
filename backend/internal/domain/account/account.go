@@ -110,6 +110,24 @@ const (
 	AuthStatusReauthRequired AuthStatus = "reauthRequired"
 )
 
+// LastErrorMissingThinking values are durable, non-sensitive quality strike
+// markers. Unlike arbitrary upstream errors, they may be propagated through
+// runtime invalidation events so every gateway instance preserves the strike.
+const (
+	LastErrorMissingThinking         = "missing_thinking"
+	LastErrorMissingThinkingDisabled = "missing_thinking_disabled"
+)
+
+// NormalizeHealthMarker admits only durable non-sensitive health markers.
+func NormalizeHealthMarker(value string) string {
+	switch value {
+	case LastErrorMissingThinking, LastErrorMissingThinkingDisabled:
+		return value
+	default:
+		return ""
+	}
+}
+
 // EgressAssignmentMode 表示账号出口节点的维护方式。手工绑定绝不会被
 // 自动均衡任务迁移，自动绑定才允许在健康或容量变化时重新分配。
 type EgressAssignmentMode string
@@ -425,6 +443,7 @@ type RoutingCandidate struct {
 	Billing              *Billing
 	QuotaWindow          *QuotaWindow
 	QuotaRecovery        *QuotaRecovery
+	EgressLeaseBlock     *EgressLeaseBlock
 	ModelQuotaBlock      *ModelQuotaBlock
 	ModelCapabilityKnown bool
 	SupportsModel        bool
@@ -433,10 +452,11 @@ type RoutingCandidate struct {
 // RoutingAccountBase contains provider-level routing state reusable across
 // models. Credential material is hydrated only after an account is selected.
 type RoutingAccountBase struct {
-	Credential    Credential
-	Billing       *Billing
-	QuotaRecovery *QuotaRecovery
-	QuotaWindow   *QuotaWindow
+	Credential       Credential
+	Billing          *Billing
+	QuotaRecovery    *QuotaRecovery
+	QuotaWindow      *QuotaWindow
+	EgressLeaseBlock *EgressLeaseBlock
 }
 
 // RoutingAccountOverlay contains model-specific eligibility state.
@@ -460,6 +480,26 @@ type ModelQuotaBlock struct {
 	Reason        string
 	CooldownUntil time.Time
 	UpdatedAt     time.Time
+}
+
+// EgressLeaseBlock temporarily removes one account-bound proxy lease from
+// routing without changing the account's health or disabling the physical
+// egress node shared by other leases.
+type EgressLeaseBlock struct {
+	AccountID     uint64
+	NodeID        uint64
+	Reason        string
+	Version       string
+	CooldownUntil time.Time
+	UpdatedAt     time.Time
+}
+
+// EgressLeaseBlockCursor is the stable keyset position used to scan durable
+// lease state while rows may be renewed or removed concurrently.
+type EgressLeaseBlockCursor struct {
+	CooldownUntil time.Time
+	AccountID     uint64
+	NodeID        uint64
 }
 
 // DeviceSession 表示一次短期 Device OAuth 授权流程。

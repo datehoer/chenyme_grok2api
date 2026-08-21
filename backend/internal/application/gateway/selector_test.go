@@ -141,9 +141,32 @@ func TestSelectorQualityProbePinsAccountToRequestedEgressNode(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer lease.Release()
 	if lease.Credential.ID != second.ID || lease.Credential.ID == first.ID {
 		t.Fatalf("selected account=%d, want=%d on node=%d", lease.Credential.ID, second.ID, secondNode.ID)
+	}
+	lease.Release()
+
+	if _, err := accounts.UpsertEgressLeaseBlock(ctx, account.EgressLeaseBlock{
+		AccountID: second.ID, NodeID: secondNode.ID, Reason: "hard_tps", Version: "selector-lease-0001", CooldownUntil: time.Now().UTC().Add(time.Hour),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	selector = NewSelector(accounts, memory.NewConcurrencyLimiter(), memory.NewStickyStore(), nil, time.Hour, time.Second, time.Minute)
+	if _, err := selector.AcquirePinnedForKey(ctx, account.ProviderBuild, second.ID, 0, "grok-test", "", true, clientkeydomain.AccountScope{}); err == nil {
+		t.Fatal("ordinary pinned inference ignored the active egress lease block")
+	} else {
+		var unavailable *SelectionUnavailableError
+		if !errors.As(err, &unavailable) || unavailable.Reason != SelectionCooling {
+			t.Fatalf("ordinary pinned error = %v", err)
+		}
+	}
+	recoveryLease, err := selector.AcquirePinnedForQualityProbe(ctx, account.ProviderBuild, second.ID, 0, "grok-test", "", clientkeydomain.AccountScope{})
+	if err != nil {
+		t.Fatalf("quality recovery did not bypass only the lease block: %v", err)
+	}
+	defer recoveryLease.Release()
+	if recoveryLease.Credential.ID != second.ID || recoveryLease.Credential.EgressNodeID != secondNode.ID {
+		t.Fatalf("quality recovery lease = %#v", recoveryLease.Credential)
 	}
 }
 
@@ -1470,6 +1493,89 @@ func (s *recordingStickyStore) Expiries() []time.Time {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return append([]time.Time(nil), s.expiries...)
+}
+
+func TestMarkMissingThinkingCoolsThenDisables(t *testing.T) {
+	ctx := context.Background()
+	database, err := relational.OpenSQLite(ctx, filepath.Join(t.TempDir(), "missing-thinking.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	if err := database.InitializeSchema(ctx); err != nil {
+		t.Fatal(err)
+	}
+	accounts := relational.NewAccountRepository(database)
+	credential, _, err := accounts.UpsertByIdentity(ctx, account.Credential{
+		Provider: account.ProviderBuild, Name: "no-think", SourceKey: "no-think", EncryptedAccessToken: "encrypted", Enabled: true,
+		AuthStatus: account.AuthStatusActive, Priority: 10, MaxConcurrent: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	selector := NewSelector(accounts, memory.NewConcurrencyLimiter(), memory.NewStickyStore(), nil, time.Hour, 30*time.Second, 30*time.Minute, 500*time.Millisecond)
+	before := time.Now().UTC()
+	if action, err := selector.markMissingThinking(ctx, credential, time.Hour); err != nil || action != missingThinkingPenaltyCooled {
+		t.Fatalf("first penalty = (%s, %v)", action, err)
+	}
+	first, err := accounts.Get(ctx, credential.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !first.Enabled || first.LastError != lastErrorMissingThinking || first.CooldownUntil == nil {
+		t.Fatalf("first strike = %#v", first)
+	}
+	if wait := first.CooldownUntil.Sub(before); wait < 50*time.Minute || wait > 70*time.Minute {
+		t.Fatalf("first cooldown = %s", wait)
+	}
+	if action, err := selector.markMissingThinking(ctx, first, time.Hour); err != nil || action != missingThinkingPenaltyUnchanged {
+		t.Fatalf("in-cooldown penalty = (%s, %v)", action, err)
+	}
+	stillCooling, err := accounts.Get(ctx, credential.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !stillCooling.Enabled {
+		t.Fatal("in-cooldown second call must not disable")
+	}
+	expired := time.Now().UTC().Add(-time.Second)
+	stillCooling.CooldownUntil = &expired
+	if action, err := selector.markMissingThinking(ctx, stillCooling, time.Hour); err != nil || action != missingThinkingPenaltyDisabled {
+		t.Fatalf("second penalty = (%s, %v)", action, err)
+	}
+	second, err := accounts.Get(ctx, credential.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.Enabled {
+		t.Fatalf("second strike after cooldown must disable, got %#v", second)
+	}
+	if second.LastError != lastErrorMissingThinkingDisabled {
+		t.Fatalf("disabled last error = %q", second.LastError)
+	}
+
+	ok, _, err := accounts.UpsertByIdentity(ctx, account.Credential{
+		Provider: account.ProviderBuild, Name: "recovered", SourceKey: "recovered", EncryptedAccessToken: "encrypted", Enabled: true,
+		AuthStatus: account.AuthStatusActive, Priority: 10, MaxConcurrent: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if action, err := selector.markMissingThinking(ctx, ok, time.Hour); err != nil || action != missingThinkingPenaltyCooled {
+		t.Fatalf("recovery penalty = (%s, %v)", action, err)
+	}
+	cooled, err := accounts.Get(ctx, ok.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	selector.MarkSuccess(ctx, cooled)
+	kept, err := accounts.Get(ctx, ok.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if kept.LastError != lastErrorMissingThinking || kept.CooldownUntil != nil || kept.FailureCount != 0 {
+		t.Fatalf("success must keep thinking strike and clear cooldown, got %#v", kept)
+	}
 }
 
 func TestMarkFailureSoftNetworkCooldown(t *testing.T) {
