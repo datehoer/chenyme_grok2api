@@ -74,7 +74,10 @@ type providerWebConfigDTO struct {
 	StatsigManualConfigured bool    `json:"statsigManualConfigured"`
 	StatsigSignerURL        string  `json:"statsigSignerURL"`
 	ClearanceMode           *string `json:"clearanceMode,omitempty"`
+	ClearanceSolver         *string `json:"clearanceSolver,omitempty"`
 	FlareSolverrURL         *string `json:"flareSolverrURL,omitempty"`
+	ClearanceSolverURL      *string `json:"clearanceSolverURL,omitempty"`
+	ClearanceSolverKey      *string `json:"clearanceSolverKey,omitempty"`
 	ClearanceTimeout        *string `json:"clearanceTimeout,omitempty"`
 	ClearanceRefresh        *string `json:"clearanceRefresh,omitempty"`
 	QuotaTimeout            string  `json:"quotaTimeout"`
@@ -184,7 +187,8 @@ func (h *Handler) update(c *gin.Context) {
 }
 
 func (value settingsConfigDTO) toApplication() settingsapp.EditableConfig {
-	clearanceProvided := value.ProviderWeb.ClearanceMode != nil || value.ProviderWeb.FlareSolverrURL != nil ||
+	clearanceProvided := value.ProviderWeb.ClearanceMode != nil || value.ProviderWeb.ClearanceSolver != nil || value.ProviderWeb.FlareSolverrURL != nil ||
+		value.ProviderWeb.ClearanceSolverURL != nil || value.ProviderWeb.ClearanceSolverKey != nil ||
 		value.ProviderWeb.ClearanceTimeout != nil || value.ProviderWeb.ClearanceRefresh != nil
 	result := settingsapp.EditableConfig{
 		Server: settingsapp.ServerConfig{MaxConcurrentRequests: value.Server.MaxConcurrentRequests},
@@ -199,7 +203,8 @@ func (value settingsConfigDTO) toApplication() settingsapp.EditableConfig {
 			BaseURL: value.ProviderWeb.BaseURL, QuotaTimeout: value.ProviderWeb.QuotaTimeout,
 			StatsigMode: value.ProviderWeb.StatsigMode, StatsigManualValue: value.ProviderWeb.StatsigManualValue,
 			StatsigManualConfigured: value.ProviderWeb.StatsigManualConfigured, StatsigSignerURL: value.ProviderWeb.StatsigSignerURL,
-			ClearanceMode: optionalString(value.ProviderWeb.ClearanceMode), FlareSolverrURL: optionalString(value.ProviderWeb.FlareSolverrURL),
+			ClearanceMode: optionalString(value.ProviderWeb.ClearanceMode), ClearanceSolver: optionalString(value.ProviderWeb.ClearanceSolver), FlareSolverrURL: optionalString(value.ProviderWeb.FlareSolverrURL),
+			ClearanceSolverURL: optionalString(value.ProviderWeb.ClearanceSolverURL), ClearanceSolverKey: optionalString(value.ProviderWeb.ClearanceSolverKey),
 			ClearanceTimeout: optionalString(value.ProviderWeb.ClearanceTimeout), ClearanceRefresh: optionalString(value.ProviderWeb.ClearanceRefresh),
 			ClearanceProvided: clearanceProvided,
 			ChatTimeout:       value.ProviderWeb.ChatTimeout, StreamIdleTimeout: value.ProviderWeb.StreamIdleTimeout,
@@ -285,7 +290,8 @@ func newSettingsResponse(value settingsapp.Snapshot) settingsResponse {
 				BaseURL: config.ProviderWeb.BaseURL, QuotaTimeout: config.ProviderWeb.QuotaTimeout,
 				StatsigMode: config.ProviderWeb.StatsigMode, StatsigManualConfigured: config.ProviderWeb.StatsigManualConfigured,
 				StatsigSignerURL: config.ProviderWeb.StatsigSignerURL,
-				ClearanceMode:    stringPointer(config.ProviderWeb.ClearanceMode), FlareSolverrURL: stringPointer(config.ProviderWeb.FlareSolverrURL),
+				ClearanceMode:    stringPointer(config.ProviderWeb.ClearanceMode), ClearanceSolver: stringPointer(config.ProviderWeb.ClearanceSolver), FlareSolverrURL: stringPointer(config.ProviderWeb.FlareSolverrURL),
+				ClearanceSolverURL: stringPointer(config.ProviderWeb.ClearanceSolverURL), ClearanceSolverKey: stringPointer(config.ProviderWeb.ClearanceSolverKey),
 				ClearanceTimeout: stringPointer(config.ProviderWeb.ClearanceTimeout), ClearanceRefresh: stringPointer(config.ProviderWeb.ClearanceRefresh),
 				ChatTimeout: config.ProviderWeb.ChatTimeout, StreamIdleTimeout: config.ProviderWeb.StreamIdleTimeout,
 				ImageTimeout:     config.ProviderWeb.ImageTimeout,

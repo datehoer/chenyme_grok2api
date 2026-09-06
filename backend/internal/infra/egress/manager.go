@@ -232,7 +232,7 @@ func NewManager(repository repository.EgressRepository, cipher *security.Cipher)
 		failureProbes:  make(map[uint64]failureProbeState),
 		newBuildClient: newBuildRequestClient, newBuildEnvClient: newBuildEnvironmentRequestClient, newBrowserClient: newBrowserClient,
 		solver:          flaresolverrSolver{},
-		clearanceConfig: ClearanceConfig{Mode: "manual", TargetURL: "https://grok.com", Timeout: time.Minute, RefreshInterval: 10 * time.Minute},
+		clearanceConfig: ClearanceConfig{Mode: "manual", Solver: "flaresolverr", TargetURL: "https://grok.com", Timeout: time.Minute, RefreshInterval: 10 * time.Minute},
 	}
 	manager.buildHeaderTimeout.Store(int64(settingsdomain.DefaultBuildResponseHeaderTimeout))
 	manager.buildStreamIdleTimeout.Store(int64(settingsdomain.DefaultBuildStreamIdleTimeout))
@@ -420,12 +420,20 @@ func (m *Manager) SetClearanceLock(value repository.DistributedLock) {
 
 func (m *Manager) UpdateClearanceConfig(value ClearanceConfig) {
 	value.Mode = strings.TrimSpace(value.Mode)
+	value.Solver = strings.TrimSpace(value.Solver)
 	value.FlareSolverrURL = strings.TrimSpace(value.FlareSolverrURL)
+	value.ClearanceSolverURL = strings.TrimSpace(value.ClearanceSolverURL)
+	value.ClearanceSolverKey = strings.TrimSpace(value.ClearanceSolverKey)
 	value.TargetURL = strings.TrimRight(strings.TrimSpace(value.TargetURL), "/")
 	m.clearanceMu.Lock()
 	previous := m.clearanceConfig
 	m.clearanceConfig = value
-	configurationChanged := previous.Mode != value.Mode || previous.FlareSolverrURL != value.FlareSolverrURL || previous.TargetURL != value.TargetURL
+	if value.Solver == "cf-clearance-scraper" {
+		m.solver = cfClearanceScraperSolver{}
+	} else if value.Solver == "flaresolverr" {
+		m.solver = flaresolverrSolver{}
+	}
+	configurationChanged := previous.Mode != value.Mode || previous.Solver != value.Solver || previous.FlareSolverrURL != value.FlareSolverrURL || previous.ClearanceSolverURL != value.ClearanceSolverURL || previous.ClearanceSolverKey != value.ClearanceSolverKey || previous.TargetURL != value.TargetURL
 	if configurationChanged {
 		m.clearanceVersion++
 		m.clientMu.Lock()
