@@ -1,12 +1,16 @@
 package egress
 
 import (
+	"crypto/rand"
+	"crypto/subtle"
+	"encoding/base64"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -21,12 +25,18 @@ import (
 // tunnel rather than the host's own address.
 //
 // The listener binds 0.0.0.0 so a solver running in a sibling container can
-// reach it; the advertised host is resolved separately (see resolveBrowserProxy).
+// reach it; each solve requires fresh proxy credentials. The advertised host is
+// resolved separately (see resolveBrowserProxy).
 type tunnelHTTPProxy struct {
-	listener net.Listener
-	dialer   *tunnelproxy.Dialer
-	server   *http.Server
-	once     sync.Once
+	listener    net.Listener
+	dialer      *tunnelproxy.Dialer
+	server      *http.Server
+	once        sync.Once
+	username    string
+	password    string
+	mu          sync.Mutex
+	closed      bool
+	connections map[net.Conn]struct{}
 }
 
 func newTunnelHTTPProxy(proxyURL string) (*tunnelHTTPProxy, error) {
@@ -38,7 +48,7 @@ func newTunnelHTTPProxy(proxyURL string) (*tunnelHTTPProxy, error) {
 	if err != nil {
 		return nil, fmt.Errorf("监听本地代理端口: %w", err)
 	}
-	proxy := &tunnelHTTPProxy{listener: listener, dialer: dialer}
+	proxy := &tunnelHTTPProxy{listener: listener, dialer: dialer, username: "clearance", password: rand.Text(), connections: make(map[net.Conn]struct{})}
 	proxy.server = &http.Server{
 		Handler:           http.HandlerFunc(proxy.handleConnect),
 		ReadHeaderTimeout: 30 * time.Second,
@@ -65,6 +75,13 @@ func (p *tunnelHTTPProxy) Close() {
 		return
 	}
 	p.once.Do(func() {
+		// http.Server.Close does not close hijacked CONNECT connections.
+		p.mu.Lock()
+		p.closed = true
+		for conn := range p.connections {
+			_ = conn.Close()
+		}
+		p.mu.Unlock()
 		_ = p.server.Close()
 	})
 }
@@ -72,6 +89,12 @@ func (p *tunnelHTTPProxy) Close() {
 func (p *tunnelHTTPProxy) handleConnect(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodConnect {
 		http.Error(w, "only CONNECT is supported", http.StatusMethodNotAllowed)
+		return
+	}
+	expected := "Basic " + base64.StdEncoding.EncodeToString([]byte(p.username+":"+p.password))
+	if subtle.ConstantTimeCompare([]byte(r.Header.Get("Proxy-Authorization")), []byte(expected)) != 1 {
+		w.Header().Set("Proxy-Authenticate", `Basic realm="clearance"`)
+		http.Error(w, "proxy authentication required", http.StatusProxyAuthRequired)
 		return
 	}
 	target := r.Host
@@ -94,12 +117,20 @@ func (p *tunnelHTTPProxy) handleConnect(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, "hijacking not supported", http.StatusInternalServerError)
 		return
 	}
-	clientConn, _, err := hijacker.Hijack()
+	clientConn, buffered, err := hijacker.Hijack()
 	if err != nil {
 		http.Error(w, "hijack failed", http.StatusInternalServerError)
 		return
 	}
 	defer clientConn.Close()
+	p.mu.Lock()
+	if p.closed {
+		p.mu.Unlock()
+		return
+	}
+	p.connections[clientConn] = struct{}{}
+	p.mu.Unlock()
+	defer func() { p.mu.Lock(); delete(p.connections, clientConn); p.mu.Unlock() }()
 
 	if _, err := clientConn.Write([]byte("HTTP/1.1 200 Connection Established\r\n\r\n")); err != nil {
 		return
@@ -107,7 +138,7 @@ func (p *tunnelHTTPProxy) handleConnect(w http.ResponseWriter, r *http.Request) 
 
 	done := make(chan struct{}, 2)
 	go func() {
-		_, _ = io.Copy(upstream, clientConn)
+		_, _ = io.Copy(upstream, buffered)
 		done <- struct{}{}
 	}()
 	go func() {
@@ -120,7 +151,7 @@ func (p *tunnelHTTPProxy) handleConnect(w http.ResponseWriter, r *http.Request) 
 // browserProxy describes a proxy endpoint that a browser-based solver can use.
 type browserProxy struct {
 	host     string
-	port     string
+	port     int
 	username string
 	password string
 	closeFn  func()
@@ -148,7 +179,12 @@ func resolveBrowserProxy(proxyURL, advertisedHost string) (browserProxy, error) 
 		if host == "" {
 			host = detectAdvertisedHost()
 		}
-		return browserProxy{host: host, port: shim.Port(), closeFn: shim.Close}, nil
+		port, err := strconv.Atoi(shim.Port())
+		if err != nil {
+			shim.Close()
+			return browserProxy{}, fmt.Errorf("无效的本地代理端口: %w", err)
+		}
+		return browserProxy{host: host, port: port, username: shim.username, password: shim.password, closeFn: shim.Close}, nil
 	}
 	switch parsed.Scheme {
 	case "http", "https":
@@ -167,7 +203,11 @@ func resolveBrowserProxy(proxyURL, advertisedHost string) (browserProxy, error) 
 			username = parsed.User.Username()
 			password, _ = parsed.User.Password()
 		}
-		return browserProxy{host: host, port: port, username: username, password: password}, nil
+		portNumber, err := strconv.Atoi(port)
+		if err != nil || portNumber < 1 || portNumber > 65535 || host == "" {
+			return browserProxy{}, fmt.Errorf("无效的浏览器代理地址")
+		}
+		return browserProxy{host: host, port: portNumber, username: username, password: password}, nil
 	default:
 		return browserProxy{}, fmt.Errorf("cf-clearance-scraper 不支持代理协议 %q", parsed.Scheme)
 	}

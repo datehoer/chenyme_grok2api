@@ -47,6 +47,10 @@ type ProviderWebConfig struct {
 	FlareSolverrURL              string
 	ClearanceSolverURL           string
 	ClearanceSolverKey           string
+	ClearanceSolverKeyConfigured bool
+	ClearanceSolverProvided      bool
+	ClearanceSolverURLProvided   bool
+	ClearanceSolverKeyProvided   bool
 	ClearanceTimeout             string
 	ClearanceRefresh             string
 	QuotaTimeout                 string
@@ -569,10 +573,21 @@ func mergeEditable(current config.Config, input EditableConfig) (config.Config, 
 	next.Provider.Web.StatsigSignerURL = strings.TrimSpace(input.ProviderWeb.StatsigSignerURL)
 	if input.ProviderWeb.ClearanceProvided {
 		next.Provider.Web.ClearanceMode = strings.TrimSpace(input.ProviderWeb.ClearanceMode)
-		next.Provider.Web.ClearanceSolver = strings.TrimSpace(input.ProviderWeb.ClearanceSolver)
 		next.Provider.Web.FlareSolverrURL = strings.TrimSpace(input.ProviderWeb.FlareSolverrURL)
+	}
+	if input.ProviderWeb.ClearanceSolverProvided {
+		next.Provider.Web.ClearanceSolver = strings.TrimSpace(input.ProviderWeb.ClearanceSolver)
+		if next.Provider.Web.ClearanceSolver == "" {
+			next.Provider.Web.ClearanceSolver = config.ClearanceSolverFlareSolverr
+		}
+	}
+	if input.ProviderWeb.ClearanceSolverURLProvided {
 		next.Provider.Web.ClearanceSolverURL = strings.TrimSpace(input.ProviderWeb.ClearanceSolverURL)
-		next.Provider.Web.ClearanceSolverKey = strings.TrimSpace(input.ProviderWeb.ClearanceSolverKey)
+	}
+	if input.ProviderWeb.ClearanceSolverKeyProvided {
+		if key := strings.TrimSpace(input.ProviderWeb.ClearanceSolverKey); key != "" {
+			next.Provider.Web.ClearanceSolverKey = key
+		}
 	}
 	if next.Provider.Web.StatsigMode == config.StatsigModeManual {
 		if value := strings.TrimSpace(input.ProviderWeb.StatsigManualValue); value != "" {
@@ -715,7 +730,7 @@ func toEditable(cfg config.Config) EditableConfig {
 			StatsigMode: cfg.Provider.Web.StatsigMode, StatsigManualConfigured: strings.TrimSpace(cfg.Provider.Web.StatsigManualValue) != "",
 			StatsigSignerURL: cfg.Provider.Web.StatsigSignerURL,
 			ClearanceMode:    cfg.Provider.Web.ClearanceMode, ClearanceSolver: cfg.Provider.Web.ClearanceSolver, FlareSolverrURL: cfg.Provider.Web.FlareSolverrURL,
-			ClearanceSolverURL: cfg.Provider.Web.ClearanceSolverURL, ClearanceSolverKey: cfg.Provider.Web.ClearanceSolverKey,
+			ClearanceSolverURL: cfg.Provider.Web.ClearanceSolverURL, ClearanceSolverKeyConfigured: strings.TrimSpace(cfg.Provider.Web.ClearanceSolverKey) != "",
 			ClearanceTimeout: cfg.Provider.Web.ClearanceTimeout.String(), ClearanceRefresh: cfg.Provider.Web.ClearanceRefresh.String(),
 			ChatTimeout: cfg.Provider.Web.ChatTimeout.String(), StreamIdleTimeout: cfg.Provider.Web.StreamIdleTimeout.String(),
 			ImageTimeout:     cfg.Provider.Web.ImageTimeout.String(),

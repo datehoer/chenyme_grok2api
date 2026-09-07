@@ -42,7 +42,7 @@ func TestCFClearanceScraperSolveMapsWafSessionResponse(t *testing.T) {
 		t.Fatalf("payload = %#v", requestPayload)
 	}
 	proxy, ok := requestPayload["proxy"].(map[string]any)
-	if !ok || proxy["host"] != "proxy" || proxy["port"] != "8080" {
+	if !ok || proxy["host"] != "proxy" || proxy["port"] != float64(8080) {
 		t.Fatalf("proxy payload = %#v", requestPayload["proxy"])
 	}
 }

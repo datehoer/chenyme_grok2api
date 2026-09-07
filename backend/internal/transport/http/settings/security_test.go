@@ -206,3 +206,38 @@ func TestLegacySettingsRequestMayOmitManagedClearance(t *testing.T) {
 		t.Fatal("missing managed-clearance fields were treated as an explicit update")
 	}
 }
+
+func TestClearanceSolverFieldPresence(t *testing.T) {
+	for _, tc := range []struct {
+		body     string
+		provided bool
+	}{
+		{`{"providerWeb":{"clearanceMode":"on_demand","flareSolverrURL":"http://flaresolverr:8191"}}`, false},
+		{`{"providerWeb":{"clearanceSolver":"","clearanceSolverURL":"","clearanceSolverKey":""}}`, true},
+	} {
+		var dto settingsConfigDTO
+		if err := json.Unmarshal([]byte(tc.body), &dto); err != nil {
+			t.Fatal(err)
+		}
+		web := dto.toApplication().ProviderWeb
+		if web.ClearanceSolverProvided != tc.provided || web.ClearanceSolverURLProvided != tc.provided || web.ClearanceSolverKeyProvided != tc.provided {
+			t.Fatal("solver field presence was lost")
+		}
+		if tc.provided && web.ClearanceProvided {
+			t.Fatal("solver-only update must not overwrite legacy clearance fields")
+		}
+	}
+}
+
+func TestSettingsResponseDoesNotExposeClearanceSolverKey(t *testing.T) {
+	response := newSettingsResponse(settingsapp.Snapshot{Config: settingsapp.EditableConfig{ProviderWeb: settingsapp.ProviderWebConfig{
+		ClearanceSolverKey: "must-not-leak", ClearanceSolverKeyConfigured: true,
+	}}})
+	data, err := json.Marshal(response)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), "must-not-leak") || strings.Contains(string(data), `"clearanceSolverKey":`) || !strings.Contains(string(data), `"clearanceSolverKeyConfigured":true`) {
+		t.Fatal("response must expose only key presence")
+	}
+}
