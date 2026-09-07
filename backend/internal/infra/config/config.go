@@ -27,6 +27,8 @@ const (
 	ClearanceModeManual           = "manual"
 	ClearanceModeFlareSolverr     = "flaresolverr"
 	ClearanceModeOnDemand         = "on_demand"
+	ClearanceSolverFlareSolverr   = "flaresolverr"
+	ClearanceSolverCFScraper      = "cf-clearance-scraper"
 	DefaultStatsigSignerURL       = "https://grok.wodf.de/sign"
 	DefaultFlareSolverrURL        = "http://flaresolverr:8191"
 	RecommendedBuildClientVersion = "1.0.4"
@@ -169,7 +171,10 @@ type WebProviderConfig struct {
 	StatsigManualValue   string   `yaml:"-"`
 	StatsigSignerURL     string   `yaml:"-"`
 	ClearanceMode        string   `yaml:"-"`
+	ClearanceSolver      string   `yaml:"-"`
 	FlareSolverrURL      string   `yaml:"-"`
+	ClearanceSolverURL   string   `yaml:"-"`
+	ClearanceSolverKey   string   `yaml:"-"`
 	ClearanceTimeout     Duration `yaml:"-"`
 	ClearanceRefresh     Duration `yaml:"-"`
 	QuotaTimeout         Duration `yaml:"quotaTimeout"`
@@ -623,8 +628,17 @@ func (c Config) Validate() error {
 	switch c.Provider.Web.ClearanceMode {
 	case ClearanceModeManual:
 	case ClearanceModeFlareSolverr, ClearanceModeOnDemand:
-		if err := validateFlareSolverrURL(c.Provider.Web.FlareSolverrURL); err != nil {
-			return fmt.Errorf("provider.web FlareSolverr URL 无效: %w", err)
+		switch c.Provider.Web.ClearanceSolver {
+		case "", ClearanceSolverFlareSolverr:
+			if err := validateFlareSolverrURL(c.Provider.Web.FlareSolverrURL); err != nil {
+				return fmt.Errorf("provider.web FlareSolverr URL 无效: %w", err)
+			}
+		case ClearanceSolverCFScraper:
+			if err := validateFlareSolverrURL(c.Provider.Web.ClearanceSolverURL); err != nil {
+				return fmt.Errorf("provider.web cf-clearance-scraper URL 无效: %w", err)
+			}
+		default:
+			return errors.New("provider.web Clearance 求解器必须是 flaresolverr 或 cf-clearance-scraper")
 		}
 	default:
 		return errors.New("provider.web Clearance 模式必须是 manual、flaresolverr 或 on_demand")
@@ -903,7 +917,7 @@ func defaultConfig() Config {
 			},
 			Web: WebProviderConfig{
 				BaseURL: "https://grok.com", StatsigMode: StatsigModeURL, StatsigSignerURL: DefaultStatsigSignerURL,
-				ClearanceMode: ClearanceModeManual, FlareSolverrURL: DefaultFlareSolverrURL,
+				ClearanceMode: ClearanceModeManual, ClearanceSolver: ClearanceSolverFlareSolverr, FlareSolverrURL: DefaultFlareSolverrURL,
 				ClearanceTimeout: Duration(time.Minute), ClearanceRefresh: Duration(10 * time.Minute),
 				QuotaTimeout: Duration(25 * time.Second),
 				ChatTimeout:  Duration(2 * time.Minute), StreamIdleTimeout: Duration(settingsdomain.DefaultWebStreamIdleTimeout),

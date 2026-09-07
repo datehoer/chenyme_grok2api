@@ -27,11 +27,14 @@ var (
 )
 
 type ClearanceConfig struct {
-	Mode            string
-	FlareSolverrURL string
-	TargetURL       string
-	Timeout         time.Duration
-	RefreshInterval time.Duration
+	Mode               string
+	Solver             string
+	FlareSolverrURL    string
+	ClearanceSolverURL string
+	ClearanceSolverKey string
+	TargetURL          string
+	Timeout            time.Duration
+	RefreshInterval    time.Duration
 }
 
 type clearanceSolution struct {

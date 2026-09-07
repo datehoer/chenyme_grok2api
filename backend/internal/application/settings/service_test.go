@@ -914,3 +914,62 @@ func TestUpdateRejectsInvalidBuildForbiddenCodes(t *testing.T) {
 		}
 	}
 }
+
+func TestClearanceSolverUpdatesPreserveOmittedFieldsAndHideKey(t *testing.T) {
+	cfg := testConfig(t)
+	cfg.Provider.Web.ClearanceMode = config.ClearanceModeOnDemand
+	cfg.Provider.Web.ClearanceSolver = config.ClearanceSolverCFScraper
+	cfg.Provider.Web.ClearanceSolverURL = "http://scraper:3000"
+	cfg.Provider.Web.ClearanceSolverKey = "original-key"
+	repo := &runtimeSettingsRepositoryStub{}
+	service := NewService(cfg, time.Time{}, 0, repo, nil, nil)
+	input := service.Get().Config
+	if input.ProviderWeb.ClearanceSolverKey != "" || !input.ProviderWeb.ClearanceSolverKeyConfigured {
+		t.Fatal("snapshot must hide configured key")
+	}
+	// A stale browser sends the pre-existing clearance fields but no solver fields.
+	input.ProviderWeb.ClearanceProvided = true
+	input.ProviderWeb.ClearanceSolver = ""
+	input.ProviderWeb.ClearanceSolverURL = ""
+	input.Server.MaxConcurrentRequests = 2048
+	if _, err := service.Update(context.Background(), 0, input); err != nil {
+		t.Fatal(err)
+	}
+	loaded, _, _, err := LoadPersisted(context.Background(), cfg, repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.Provider.Web.ClearanceSolver != cfg.Provider.Web.ClearanceSolver || loaded.Provider.Web.ClearanceSolverURL != cfg.Provider.Web.ClearanceSolverURL || loaded.Provider.Web.ClearanceSolverKey != "original-key" {
+		t.Fatal("legacy update lost solver configuration")
+	}
+	for _, key := range []string{"", "replacement-key", "  "} {
+		input = service.Get().Config
+		input.ProviderWeb.ClearanceSolverKeyProvided = true
+		input.ProviderWeb.ClearanceSolverKey = key
+		snapshot, err := service.Update(context.Background(), service.Get().Revision, input)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if snapshot.Config.ProviderWeb.ClearanceSolverKey != "" || !snapshot.Config.ProviderWeb.ClearanceSolverKeyConfigured {
+			t.Fatal("update response leaked key")
+		}
+		expected := "replacement-key"
+		if key == "" {
+			expected = "original-key"
+		}
+		if repo.value.ProviderWeb.ClearanceSolverKey != expected {
+			t.Fatal("blank key was not preserved or replacement was not applied")
+		}
+	}
+	input = service.Get().Config
+	input.ProviderWeb.ClearanceSolverProvided = true
+	input.ProviderWeb.ClearanceSolver = config.ClearanceSolverFlareSolverr
+	input.ProviderWeb.ClearanceSolverURLProvided = true
+	input.ProviderWeb.ClearanceSolverURL = "http://new-scraper:3000"
+	if _, err := service.Update(context.Background(), service.Get().Revision, input); err != nil {
+		t.Fatal(err)
+	}
+	if repo.value.ProviderWeb.ClearanceSolver != config.ClearanceSolverFlareSolverr || repo.value.ProviderWeb.ClearanceSolverURL != "http://new-scraper:3000" {
+		t.Fatal("explicit solver changes were ignored")
+	}
+}

@@ -40,7 +40,9 @@ export function SettingsPage() {
   const loading = settingsQuery.isPending;
   const statsigMode = form.watch("providerWeb.statsigMode");
   const draftClearanceMode = form.watch("providerWeb.clearanceMode");
+  const draftClearanceSolver = form.watch("providerWeb.clearanceSolver");
   const activeClearanceMode = snapshot?.config.providerWeb.clearanceMode ?? draftClearanceMode;
+  const clearanceSolverKeyConfigured = form.watch("providerWeb.clearanceSolverKeyConfigured");
   const statsigManualConfigured = form.watch("providerWeb.statsigManualConfigured");
   const buildClientVersion = form.watch("providerBuild.clientVersion");
   const buildUserAgent = form.watch("providerBuild.userAgent");
@@ -203,7 +205,21 @@ export function SettingsPage() {
                 )} />
               </SettingsField>
               {draftClearanceMode !== "manual" ? <>
-                <SettingsField controlId="egress-flaresolverr-url" className="sm:col-span-2" label={t("settings.web.flareSolverrURL")} description={t("settings.web.flareSolverrURLHelp")} error={form.formState.errors.providerWeb?.flareSolverrURL?.message}><Input id="egress-flaresolverr-url" type="url" placeholder="http://flaresolverr:8191" {...form.register("providerWeb.flareSolverrURL")} /></SettingsField>
+                <SettingsField controlId="egress-clearance-solver" className="sm:col-span-2" label={t("settings.web.clearanceSolver")} description={t("settings.web.clearanceSolverHelp")} error={form.formState.errors.providerWeb?.clearanceSolver?.message}>
+                  <Controller control={form.control} name="providerWeb.clearanceSolver" render={({ field }) => (
+                    <Select value={field.value} onValueChange={field.onChange}>
+                      <SelectTrigger id="egress-clearance-solver"><SelectValue /></SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="flaresolverr">{t("settings.web.clearanceSolverFlareSolverr")}</SelectItem>
+                        <SelectItem value="cf-clearance-scraper">{t("settings.web.clearanceSolverCFScraper")}</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  )} />
+                </SettingsField>
+                {draftClearanceSolver === "cf-clearance-scraper" ? <>
+                  <SettingsField controlId="egress-clearance-solver-url" className="sm:col-span-2" label={t("settings.web.clearanceSolverURL")} description={t("settings.web.clearanceSolverURLHelp")} error={form.formState.errors.providerWeb?.clearanceSolverURL?.message}><Input id="egress-clearance-solver-url" type="url" placeholder="http://cf-clearance-scraper:3000" {...form.register("providerWeb.clearanceSolverURL")} /></SettingsField>
+                  <SettingsField controlId="egress-clearance-solver-key" className="sm:col-span-2" label={t("settings.web.clearanceSolverKey")} description={t("settings.web.clearanceSolverKeyHelp")} badge={clearanceSolverKeyConfigured ? t("settings.web.statsigConfigured") : undefined} error={form.formState.errors.providerWeb?.clearanceSolverKey?.message}><Input id="egress-clearance-solver-key" type="password" autoComplete="off" placeholder={clearanceSolverKeyConfigured ? t("settings.web.statsigKeepConfigured") : "CLIENT_KEY"} {...form.register("providerWeb.clearanceSolverKey")} /></SettingsField>
+                </> : <SettingsField controlId="egress-flaresolverr-url" className="sm:col-span-2" label={t("settings.web.flareSolverrURL")} description={t("settings.web.flareSolverrURLHelp")} error={form.formState.errors.providerWeb?.flareSolverrURL?.message}><Input id="egress-flaresolverr-url" type="url" placeholder="http://flaresolverr:8191" {...form.register("providerWeb.flareSolverrURL")} /></SettingsField>}
                 <SettingsField controlId="egress-clearance-timeout" label={t("settings.web.clearanceTimeout")} description={t("settings.web.clearanceTimeoutHelp")} error={form.formState.errors.providerWeb?.clearanceTimeout?.message}><Controller control={form.control} name="providerWeb.clearanceTimeout" render={({ field }) => <DurationInput id="egress-clearance-timeout" value={field.value} onChange={field.onChange} />} /></SettingsField>
                 {draftClearanceMode === "flaresolverr" ? <SettingsField controlId="egress-clearance-refresh" label={t("settings.web.clearanceRefresh")} description={t("settings.web.clearanceRefreshHelp")} error={form.formState.errors.providerWeb?.clearanceRefresh?.message}><Controller control={form.control} name="providerWeb.clearanceRefresh" render={({ field }) => <DurationInput id="egress-clearance-refresh" value={field.value} onChange={field.onChange} />} /></SettingsField> : null}
               </> : null}

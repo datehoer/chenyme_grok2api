@@ -84,7 +84,11 @@ export const settingsSchema = z.object({
     statsigManualConfigured: z.boolean(),
     statsigSignerURL: z.string().trim().max(2048),
     clearanceMode: z.enum(["manual", "flaresolverr", "on_demand"]),
+    clearanceSolver: z.enum(["flaresolverr", "cf-clearance-scraper"]),
     flareSolverrURL: z.string().trim().max(2048),
+    clearanceSolverURL: z.string().trim().max(2048),
+    clearanceSolverKey: z.string().trim().max(4096),
+    clearanceSolverKeyConfigured: z.boolean(),
     clearanceTimeout: durationSchema.refine((value) => durationSeconds(value) >= 10 && durationSeconds(value) <= 300),
     clearanceRefresh: durationSchema.refine((value) => durationSeconds(value) >= 60 && durationSeconds(value) <= 86_400),
     quotaTimeout: durationSchema, chatTimeout: durationSchema, streamIdleTimeout: providerStreamIdleDuration, imageTimeout: durationSchema, videoTimeout: durationSchema,
@@ -109,8 +113,11 @@ export const settingsSchema = z.object({
         context.addIssue({ code: "custom", path: ["statsigSignerURL"], message: "invalid" });
       }
     }
-    if (value.clearanceMode !== "manual" && !validHTTPURL(value.flareSolverrURL)) {
+    if (value.clearanceMode !== "manual" && value.clearanceSolver === "flaresolverr" && !validHTTPURL(value.flareSolverrURL)) {
       context.addIssue({ code: "custom", path: ["flareSolverrURL"], message: "invalid" });
+    }
+    if (value.clearanceMode !== "manual" && value.clearanceSolver === "cf-clearance-scraper" && !validHTTPURL(value.clearanceSolverURL)) {
+      context.addIssue({ code: "custom", path: ["clearanceSolverURL"], message: "invalid" });
     }
   }),
   providerConsole: z.object({
@@ -193,6 +200,7 @@ export function toSettingsForm(config: SettingsConfigDTO): SettingsForm {
     providerWeb: {
       ...config.providerWeb,
       statsigManualValue: "",
+      clearanceSolverKey: "",
       clearanceTimeout: parseDuration(config.providerWeb.clearanceTimeout), clearanceRefresh: parseDuration(config.providerWeb.clearanceRefresh),
       quotaTimeout: parseDuration(config.providerWeb.quotaTimeout), chatTimeout: parseDuration(config.providerWeb.chatTimeout), streamIdleTimeout: parseDuration(config.providerWeb.streamIdleTimeout),
       imageTimeout: parseDuration(config.providerWeb.imageTimeout), videoTimeout: parseDuration(config.providerWeb.videoTimeout),

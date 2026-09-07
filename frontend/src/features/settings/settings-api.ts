@@ -8,7 +8,7 @@ export type SettingsConfigDTO = {
   providerWeb: {
     baseURL: string; quotaTimeout: string; chatTimeout: string; streamIdleTimeout: string; imageTimeout: string; videoTimeout: string;
     statsigMode: "manual" | "url"; statsigManualValue?: string; statsigManualConfigured: boolean; statsigSignerURL: string;
-    clearanceMode: ClearanceMode; flareSolverrURL: string; clearanceTimeout: string; clearanceRefresh: string;
+    clearanceMode: ClearanceMode; clearanceSolver: ClearanceSolver; flareSolverrURL: string; clearanceSolverURL: string; clearanceSolverKey?: string; clearanceSolverKeyConfigured: boolean; clearanceTimeout: string; clearanceRefresh: string;
     mediaConcurrency: number; allowNSFW: boolean; freeVideoDurationCap?: number;
     recoveryBackoffBase: string; recoveryBackoffMax: string;
   };
@@ -38,6 +38,8 @@ export type SettingsConfigDTO = {
 };
 
 export type ClearanceMode = "manual" | "flaresolverr" | "on_demand";
+
+export type ClearanceSolver = "flaresolverr" | "cf-clearance-scraper";
 
 export type EgressNodeDTO = {
 	id: string; name: string; scope: EgressScope; enabled: boolean;
@@ -120,7 +122,7 @@ const settingsConfigValidator = hasShape({
   providerWeb: hasShape({
     baseURL: isString, quotaTimeout: isString, chatTimeout: isString, streamIdleTimeout: isOptional(isString), imageTimeout: isString, videoTimeout: isString,
     statsigMode: isOneOf("manual", "url"), statsigManualValue: isOptional(isString), statsigManualConfigured: isBoolean,
-    statsigSignerURL: isString, clearanceMode: isOneOf("manual", "flaresolverr", "on_demand"), flareSolverrURL: isString,
+    statsigSignerURL: isString, clearanceMode: isOneOf("manual", "flaresolverr", "on_demand"), clearanceSolver: isOneOf("flaresolverr", "cf-clearance-scraper"), flareSolverrURL: isString, clearanceSolverURL: isString, clearanceSolverKey: isOptional(isString), clearanceSolverKeyConfigured: isBoolean,
     clearanceTimeout: isString, clearanceRefresh: isString, mediaConcurrency: isNumber, allowNSFW: isBoolean, freeVideoDurationCap: isOptional(isNumber), recoveryBackoffBase: isString, recoveryBackoffMax: isString,
   }),
   providerConsole: hasShape({ baseURL: isString, chatTimeout: isString, streamIdleTimeout: isOptional(isString) }),
